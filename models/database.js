@@ -1,47 +1,76 @@
-const { Sequelize, DataTypes } = require("sequelize"); 
-const sequelize = require("../config/db.js");
+-- Disable foreign key checks to allow dropping tables with circular dependencies
+SET FOREIGN_KEY_CHECKS = 0;
 
-// 1. USERS TABLE
-const User = sequelize.define("User", {
-  user_id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-  name: DataTypes.STRING,
-  email: { type: DataTypes.STRING, unique: true },
-  password_hash: DataTypes.STRING,
-  role_id: DataTypes.INTEGER,
-  team_id: DataTypes.INTEGER,
-  status: { type: DataTypes.ENUM("active", "inactive"), defaultValue: "active" },
-  created_at: { type: DataTypes.DATE, defaultValue: Sequelize.NOW }
-}, { tableName: "users", timestamps: false });
+DROP TABLE IF EXISTS THRESHOLD_SETTINGS;
+DROP TABLE IF EXISTS NOTIFICATIONS;
+DROP TABLE IF EXISTS STOCK_LOGS;
+DROP TABLE IF EXISTS PRODUCTS;
+DROP TABLE IF EXISTS INVENTORY_ASSIGNMENTS;
+DROP TABLE IF EXISTS INVENTORY;
+DROP TABLE IF EXISTS INVITATIONS;
+DROP TABLE IF EXISTS TEAM_MEMBERS;
+DROP TABLE IF EXISTS TEAMS;
+DROP TABLE IF EXISTS USERS;
+DROP TABLE IF EXISTS ROLES;
 
-// ... All other model definitions remain the same
+-- Re-enable foreign key checks for the rest of the script
+SET FOREIGN_KEY_CHECKS = 1;
 
-// Relationships
-Role.hasMany(User, { foreignKey: "role_id" });
-User.belongsTo(Role, { foreignKey: "role_id" });
+-- 1. ROLES TABLE
+CREATE TABLE ROLES (
+    role_id INT PRIMARY KEY AUTO_INCREMENT,
+    role_name VARCHAR(50) UNIQUE NOT NULL,
+    permissions JSON
+);
 
-Team.hasMany(User, { foreignKey: "team_id" });
-User.belongsTo(Team, { foreignKey: "team_id" });
+-- 2. USERS TABLE
+CREATE TABLE USERS (
+    user_id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role_id INT NOT NULL,
+    team_id INT,
+    status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (role_id) REFERENCES ROLES(role_id)
+);
 
-Inventory.hasMany(Product, { foreignKey: "inventory_id" });
-Product.belongsTo(Inventory, { foreignKey: "inventory_id" });
+-- 3. TEAMS TABLE
+CREATE TABLE TEAMS (
+    team_id INT PRIMARY KEY AUTO_INCREMENT,
+    team_name VARCHAR(255) NOT NULL,
+    owner_id INT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (owner_id) REFERENCES USERS(user_id)
+);
 
-Product.hasMany(StockLog, { foreignKey: "product_id" });
-StockLog.belongsTo(Product, { foreignKey: "product_id" });
+-- Add the foreign key from USERS to TEAMS
+ALTER TABLE USERS ADD CONSTRAINT fk_user_team FOREIGN KEY (team_id) REFERENCES TEAMS(team_id);
 
-User.hasMany(StockLog, { foreignKey: "user_id" });
-User.hasMany(Notification, { foreignKey: "user_id" });
-User.hasMany(ThresholdSetting, { foreignKey: "notify_user_id" });
+-- 4. TEAM_MEMBERS TABLE
+CREATE TABLE TEAM_MEMBERS (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    team_id INT NOT NULL,
+    user_id INT NOT NULL,
+    role_id INT NOT NULL,
+    joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (team_id) REFERENCES TEAMS(team_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES USERS(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES ROLES(role_id),
+    UNIQUE(team_id, user_id)
+);
 
-// Export all models in a single object
-module.exports = {
-  User,
-  Role,
-  Team,
-  TeamMember,
-  Inventory,
-  InventoryAssignment,
-  Product,
-  StockLog,
-  Notification,
-  ThresholdSetting,
-};
+-- (Other tables: INVENTORY, PRODUCTS, etc. go here)
+
+-- 11. INVITATIONS TABLE
+CREATE TABLE INVITATIONS (
+    invitation_id INT PRIMARY KEY AUTO_INCREMENT,
+    team_id INT NOT NULL,
+    invited_email VARCHAR(255) NOT NULL,
+    token VARCHAR(255) UNIQUE NOT NULL,
+    status ENUM('pending', 'accepted') NOT NULL DEFAULT 'pending',
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (team_id) REFERENCES TEAMS(team_id) ON DELETE CASCADE
+);

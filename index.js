@@ -1,143 +1,144 @@
+// ### 1. Import Dependencies ###
 const express = require('express');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');         // ⭐️ New
-const cookieParser = require('cookie-parser'); // ⭐️ New
+const jwt = require('jsonwebtoken'); // ⭐️ Changed
+const cookieParser = require('cookie-parser');
 require('dotenv').config();
 
+// ### 2. App & Middleware Setup ###
 const app = express();
-const port = 3000;
-app.set('view engine', 'ejs');
+const PORT = 3000;
 
-// Middleware
+app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use(cookieParser()); // ⭐️ New: Use cookie parser middleware
-app.use(express.static('public'));
+app.use(cookieParser()); // Used to read the token from cookies
 
-// Create a connection pool
+// ### 3. Database Connection Pool ###
 const dbPool = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME
 });
+console.log('✅ Database connection pool created.');
 
-// ⭐️ New: Middleware to verify JWT
+// ⭐️ New: Middleware to verify JWT and protect routes
 const authenticateToken = (req, res, next) => {
-    const token = req.cookies.token; // Get token from cookies
+    const token = req.cookies.token; // Read token from the cookie
 
     if (!token) {
-        // If no token is found, redirect to login
-        return res.redirect('/login');
+        return res.redirect('/login'); // If no token, user is not logged in
     }
 
     try {
-        // Verify the token
+        // Verify the token using the secret key
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded; // Attach user data from token to the request object
+        req.user = decoded; // Attach the user payload (id, name, email) to the request
         next(); // Proceed to the protected route
     } catch (err) {
-        // If token is invalid (e.g., expired), clear cookie and redirect
+        // If token is invalid or expired
         res.clearCookie('token');
         return res.redirect('/login');
     }
 };
 
 // --- Page Routes ---
+
 app.get('/', (req, res) => {
-    return res.render('login');
+    // If a valid token cookie exists, redirect to dashboard
+    if (req.cookies.token) {
+        return res.redirect('/dashboard');
+    }
+    res.redirect('/login');
 });
+
 app.get('/register', (req, res) => {
-    return res.render('register');
+    res.render('register');
 });
+
 app.get('/login', (req, res) => {
-    return res.render('login');
+    res.render('login');
 });
 
 // --- API Endpoints ---
 
-// POST /register: No changes needed here
+// POST /register (No changes needed)
 app.post('/register', async (req, res) => {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
-        return res.status(400).send('Please fill out all fields.');
+        return res.status(400).send('Please provide all fields.');
     }
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
-        // Using role_id 3 as default as per earlier discussions
-        const sql = `INSERT INTO USERS (name, email, password_hash, role_id) VALUES (?, ?, ?, ?);`;
-        await dbPool.execute(sql, [name, email, hashedPassword, 3]);
+        const sql = `INSERT INTO USERS (name, email, password_hash) VALUES (?, ?, ?);`;
+        await dbPool.execute(sql, [name, email, hashedPassword]);
         res.send('<h1>Registration successful!</h1><p>You can now <a href="/login">log in</a>.</p>');
     } catch (error) {
         if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(409).send('Error: This email is already registered.');
+            return res.status(409).send('An account with this email already exists.');
         }
-        res.status(500).send('Error registering user.');
+        console.error("Registration Error:", error);
+        res.status(500).send('An error occurred during registration.');
     }
 });
 
-// ⭐️ Changed: POST /login now creates a JWT
+// ⭐️ Changed: POST /login now creates a JWT and sets it in a cookie
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) {
         return res.status(400).send('Please provide both email and password.');
     }
     try {
-        const sql = 'SELECT * FROM USERS WHERE email = ?';
-        const [rows] = await dbPool.execute(sql, [email]);
-
+        const [rows] = await dbPool.execute('SELECT * FROM USERS WHERE email = ?', [email]);
         if (rows.length === 0) {
             return res.status(401).send('Invalid email or password.');
         }
         const user = rows[0];
-        const match = await bcrypt.compare(password, user.password_hash);
+        const isMatch = await bcrypt.compare(password, user.password_hash);
 
-        if (match) {
+        if (isMatch) {
             // Passwords match! Create a JWT payload.
             const payload = {
                 id: user.user_id,
                 name: user.name,
-                email: user.email,
-                role_id: user.role_id
+                email: user.email
             };
 
-            // Sign the token
+            // Sign the token with the secret key, setting it to expire in 1 hour
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' });
 
             // Send the token in a secure, http-only cookie
             res.cookie('token', token, {
-                httpOnly: true, // Prevents client-side JS from accessing the cookie
-                // secure: process.env.NODE_ENV === 'production', // Use secure cookies in production (HTTPS)
-                maxAge: 3600000 // 1 hour
+                httpOnly: true,
+                secure: false, // Set to true in production (HTTPS)
+                maxAge: 3600000 // 1 hour in milliseconds
             });
 
-            // Redirect to the dashboard
             res.redirect('/dashboard');
         } else {
             res.status(401).send('Invalid email or password.');
         }
     } catch (error) {
+        console.error("Login Error:", error);
         res.status(500).send('An error occurred during login.');
     }
 });
 
-// ⭐️ Changed: GET /dashboard is now a protected route
-app.get('/dashboard', authenticateToken, async (req, res) => {
-    // The user's info is now available in `req.user` from the middleware
-    res.render('dashboard', { user: req.user });
+// ⭐️ Changed: Dashboard is now a protected route using our middleware
+app.get('/dashboard', authenticateToken, (req, res) => {
+    // The user's data is available from the middleware via `req.user`
+    res.send(`<h1>Welcome, ${req.user.name}!</h1><a href="/logout">Logout</a>`);
 });
 
-// ⭐️ New: Logout route
+// ⭐️ Changed: Logout now clears the token cookie
 app.get('/logout', (req, res) => {
-    res.clearCookie('token'); // Clear the cookie
-    res.redirect('/login');   // Redirect to login page
+    res.clearCookie('token');
+    res.redirect('/login');
 });
 
-// Start the server
-app.listen(port, () => {
-    console.log(`🚀 Server running at http://localhost:${port}`);
+// ### 4. Start Server ###
+app.listen(PORT, () => {
+  console.log(`🚀 Server is running on http://localhost:${PORT}`);
 });

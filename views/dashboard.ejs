@@ -5,15 +5,73 @@
     <title>Dashboard</title>
 </head>
 <body>
-
     <h1>Welcome, <%= user.name %>!</h1>
-    <p>Your email is: <%= user.email %></p>
-
     <a href="/logout">Logout</a>
+    <hr>
+    <h2>Team Management</h2>
+
+    <h3>Create a New Team</h3>
+    <form action="/teams/create" method="POST">
+        <div>
+            <label for="team_name">Team Name:</label>
+            <input type="text" id="team_name" name="team_name" required>
+        </div>
+        <br>
+        <button type="submit">Create Team</button>
+    </form>
+    <hr>
+
+    <h3>Your Teams</h3>
+    <% if (teams.length > 0) { %>
+        <% teams.forEach(function(team) { %>
+            <div style="border: 1px solid #ccc; padding: 10px; margin-bottom: 15px;">
+                <h3>Team: <%= team.team_name %></h3>
+
+                <form action="/teams/<%= team.team_id %>/invite" method="POST">
+                    <input type="email" name="email" placeholder="Enter user email to invite" required>
+                    <button type="submit">Invite by Email</button>
+                </form>
+
+                <h4>✅ Accepted Members</h4>
+                <% if (team.members.length > 0) { %>
+                    <ul>
+                        <% team.members.forEach(function(member) { %>
+                            <li><%= member.name %> (<%= member.email %>)</li>
+                        <% }); %>
+                    </ul>
+                <% } else { %>
+                    <p>No accepted members yet.</p>
+                <% } %>
+
+                <h4>⏳ Pending Invitations (&lt;24 hours)</h4>
+                <% if (team.pending_invitations.length > 0) { %>
+                    <ul>
+                        <% team.pending_invitations.forEach(function(invite) { %>
+                            <li><%= invite.invited_email %></li>
+                        <% }); %>
+                    </ul>
+                <% } else { %>
+                    <p>No pending invitations.</p>
+                <% } %>
+
+                <h4>❌ Expired Invitations (&gt;24 hours)</h4>
+                <% if (team.expired_invitations.length > 0) { %>
+                    <ul>
+                        <% team.expired_invitations.forEach(function(invite) { %>
+                            <li><%= invite.invited_email %></li>
+                        <% }); %>
+                    </ul>
+                <% } else { %>
+                    <p>No expired invitations.</p>
+                <% } %>
+            </div>
+        <% }); %>
+    <% } else { %>
+        <p>You have not created any teams yet.</p>
+    <% } %>
 
     <hr>
-    <h2>Your Dashboard Content</h2>
-    <p>This page is protected. Only logged-in users can see it.</p>
-
+    <h2>Inventory Management</h2>
+    <p>Inventory module will be implemented here.</p>
 </body>
 </html>
