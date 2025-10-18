@@ -126,10 +126,65 @@ app.post('/login', async (req, res) => {
     }
 });
 
-// ⭐️ Changed: Dashboard is now a protected route using our middleware
-app.get('/dashboard', authenticateToken, (req, res) => {
-    // The user's data is available from the middleware via `req.user`
-    res.send(`<h1>Welcome, ${req.user.name}!</h1><a href="/logout">Logout</a>`);
+app.post('/organizations/create', authenticateToken, async (req, res) => {
+    const { org_name } = req.body;
+    const owner_id = req.user.id; // The logged-in user becomes the owner
+
+    if (!org_name) {
+        return res.status(400).send('Organization name is required.');
+    }
+
+    let connection;
+    try {
+        // Use a transaction to ensure both queries succeed or neither do
+        connection = await dbPool.getConnection();
+        await connection.beginTransaction();
+
+        // Step 1: Create the organization
+        const orgSql = 'INSERT INTO ORGANIZATIONS (org_name, owner_id) VALUES (?, ?)';
+        const [orgResult] = await connection.execute(orgSql, [org_name, owner_id]);
+        const newOrgId = orgResult.insertId;
+
+        // Step 2: Add the creator as the 'Owner' in the ORGANIZATION_MEMBERS table
+        // The role_id for 'Owner' is 1, as seeded by our init script.
+        const ownerRoleId = 1;
+        const memberSql = 'INSERT INTO ORGANIZATION_MEMBERS (org_id, user_id, role_id) VALUES (?, ?, ?)';
+        await connection.execute(memberSql, [newOrgId, owner_id, ownerRoleId]);
+
+        // If both queries are successful, commit the transaction
+        await connection.commit();
+
+        res.redirect('/dashboard');
+
+    } catch (error) {
+        if (connection) await connection.rollback(); // Rollback on error
+        console.error("Error creating organization:", error);
+        res.status(500).send('Failed to create organization.');
+    } finally {
+        if (connection) connection.release(); // Release connection back to the pool
+    }
+});
+
+// ⭐️ Changed: Dashboard now fetches and displays the user's organizations
+app.get('/dashboard', authenticateToken, async (req, res) => {
+    try {
+        // Query to get all organizations the user is a member of, along with their role in each.
+        const sql = `
+            SELECT o.org_id, o.org_name, r.role_name
+            FROM ORGANIZATION_MEMBERS om
+            JOIN ORGANIZATIONS o ON om.org_id = o.org_id
+            JOIN ROLES r ON om.role_id = r.role_id
+            WHERE om.user_id = ?`;
+        
+        const [organizations] = await dbPool.execute(sql, [req.user.id]);
+        
+        // Render a new dashboard view, passing the user's data and their list of orgs
+        res.render('dashboard', { user: req.user, organizations: organizations });
+
+    } catch (error) {
+        console.error("Error fetching dashboard data:", error);
+        res.status(500).send('Could not load dashboard data.');
+    }
 });
 
 // ⭐️ Changed: Logout now clears the token cookie
