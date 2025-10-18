@@ -15,7 +15,8 @@
                 <tr>
                     <th>Name</th>
                     <th>Email</th>
-                    <th>Role</th>
+                    <th>Current Role</th>
+                    <th>Action</th>
                 </tr>
             </thead>
             <tbody>
@@ -24,6 +25,24 @@
                         <td><%= member.name %></td>
                         <td><%= member.email %></td>
                         <td><%= member.role_name %></td>
+                        <td>
+                            <% if (member.role_name !== 'Owner' && member.user_id !== user.id) { %>
+                                <form action="/organizations/<%= orgId %>/members/<%= member.user_id %>/update-role" method="POST">
+                                    <select name="new_role_id">
+                                        <% orgRoles.forEach(function(role) { %>
+                                            <% if (role.role_name !== 'Owner') { %>
+                                                <option value="<%= role.role_id %>" <%= member.role_id === role.role_id ? 'selected' : '' %>>
+                                                    <%= role.role_name %>
+                                                </option>
+                                            <% } %>
+                                        <% }); %>
+                                    </select>
+                                    <button type="submit">Update Role</button>
+                                </form>
+                            <% } else { %>
+                                No actions available
+                            <% } %>
+                        </td>
                     </tr>
                 <% }); %>
             </tbody>

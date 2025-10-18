@@ -136,16 +136,44 @@ app.post('/organizations/create', authenticateToken, async (req, res) => {
 app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
     const { email: memberEmail } = req.body;
     const { orgId } = req.params;
+    const requesterId = req.user.id; // The person trying to add a member
     const adderName = req.user.name;
+
     if (!memberEmail) {
         return res.status(400).send('Email is required.');
     }
+
     try {
+        // ⭐ Step 1: Security Check - Verify the role of the user making the request.
+        const requesterRoleSql = `
+            SELECT r.role_name 
+            FROM ORGANIZATION_MEMBERS om
+            JOIN ROLES r ON om.role_id = r.role_id
+            WHERE om.user_id = ? AND om.org_id = ?`;
+        
+        const [requesterRows] = await dbPool.execute(requesterRoleSql, [requesterId, orgId]);
+
+        if (requesterRows.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+
+        const requesterRole = requesterRows[0].role_name;
+        const allowedRoles = ['Owner', 'Admin'];
+
+        if (!allowedRoles.includes(requesterRole)) {
+            return res.status(403).send("Forbidden: You do not have permission to add members to this organization.");
+        }
+        
+        // --- If the check passes, proceed with the original logic ---
+
+        // Step 2: Check if the user to be added is registered.
         const [users] = await dbPool.execute('SELECT user_id FROM USERS WHERE email = ?', [memberEmail]);
         if (users.length === 0) {
             return res.status(404).send('<h1>User Not Found</h1><p>A user with this email is not registered. Please ask them to create an account first.</p><a href="/dashboard">Go Back</a>');
         }
         const memberId = users[0].user_id;
+
+        // Step 3: Check if the user is already in the organization.
         const [existingMembers] = await dbPool.execute(
             'SELECT user_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
             [memberId, orgId]
@@ -153,25 +181,30 @@ app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
         if (existingMembers.length > 0) {
             return res.status(409).send('<h1>Already a Member</h1><p>This user is already in the organization.</p><a href="/dashboard">Go Back</a>');
         }
+
+        // Step 4: Add the user with the default 'Member' role (ID 3).
         await dbPool.execute(
             'INSERT INTO ORGANIZATION_MEMBERS (org_id, user_id, role_id) VALUES (?, ?, ?)',
-            [orgId, memberId, 3] // Default role is 'Member' (ID 3)
+            [orgId, memberId, 3]
         );
+
+        // Step 5: Send a notification email.
         const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
         const mailOptions = {
             from: process.env.EMAIL_USER,
             to: memberEmail,
             subject: `You've been added to the organization: ${orgs[0].org_name}`,
-            html: `<h1>You're on the team!</h1><p><b>${adderName}</b> has added you to the "<b>${orgs[0].org_name}</b>" organization.</p><p>You can now log in to access the organization's resources.</p><a href="http://localhost:${PORT}/login">Login Now</a>`
+            html: `<h1>You're on the team!</h1><p><b>${adderName}</b> has added you to the "<b>${orgs[0].org_name}</b>" organization.</p><p>You can now log in to access its resources.</p><a href="http://localhost:${PORT}/login">Login Now</a>`
         };
         await transporter.sendMail(mailOptions);
+
         res.redirect('/dashboard');
+
     } catch (error) {
         console.error("Add Member Error:", error);
         res.status(500).send('Failed to add member to the organization.');
     }
 });
-
 // GET /dashboard
 app.get('/dashboard', authenticateToken, async (req, res) => {
     try {
@@ -195,7 +228,7 @@ app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => 
     const userId = req.user.id;
 
     try {
-        // Security Check: First, verify the current user is actually a member of this organization.
+        // Security Check: Verify the current user is a member of this organization.
         const [membershipCheck] = await dbPool.execute(
             'SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
             [userId, orgId]
@@ -204,29 +237,31 @@ app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => 
             return res.status(403).send("Forbidden: You are not a member of this organization.");
         }
 
-        // Fetch the organization's name for the page title
+        // Fetch organization name
         const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
-        if (orgs.length === 0) {
-            return res.status(404).send("Organization not found.");
-        }
-        const orgName = orgs[0].org_name;
-
-        // Fetch all members of this organization, along with their roles
+        if (orgs.length === 0) return res.status(404).send("Organization not found.");
+        
+        // Fetch all members of this organization, including their current role_id
         const membersSql = `
-            SELECT u.name, u.email, r.role_name
+            SELECT u.user_id, u.name, u.email, r.role_name, om.role_id
             FROM ORGANIZATION_MEMBERS om
             JOIN USERS u ON om.user_id = u.user_id
             JOIN ROLES r ON om.role_id = r.role_id
-            WHERE om.org_id = ?
-            ORDER BY r.role_id, u.name;
+            WHERE om.org_id = ? ORDER BY r.role_id, u.name;
         `;
         const [members] = await dbPool.execute(membersSql, [orgId]);
 
-        // Render a new view to display the members
+        // Fetch all possible roles for the 'organization' scope to populate the dropdown
+        const [orgRoles] = await dbPool.execute(
+            `SELECT role_id, role_name FROM ROLES WHERE scope = 'organization'`
+        );
+
         res.render('org-members', {
             user: req.user,
-            orgName: orgName,
-            members: members
+            orgName: orgs[0].org_name,
+            orgId: orgId,
+            members: members,
+            orgRoles: orgRoles // Pass the roles to the view
         });
 
     } catch (error) {
@@ -235,6 +270,53 @@ app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => 
     }
 });
 
+// ⭐ New: POST route to handle updating a user's role
+app.post('/organizations/:orgId/members/:memberId/update-role', authenticateToken, async (req, res) => {
+    const { orgId, memberId } = req.params;
+    const { new_role_id } = req.body;
+    const requesterId = req.user.id;
+
+    try {
+        // Security Check 1: Get the role of the person MAKING the request
+        const [requesterRows] = await dbPool.execute(
+            'SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?',
+            [requesterId, orgId]
+        );
+
+        if (requesterRows.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+        
+        const requesterRole = requesterRows[0].role_name;
+        const allowedRoles = ['Owner', 'Admin'];
+
+        // Security Check 2: Ensure the requester is an Owner or Admin
+        if (!allowedRoles.includes(requesterRole)) {
+            return res.status(403).send("Forbidden: You do not have permission to change roles.");
+        }
+        
+        // Security Check 3: Prevent the Owner's role from being changed by anyone
+        const [targetUserRows] = await dbPool.execute(
+            'SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?',
+            [memberId, orgId]
+        );
+
+        if (targetUserRows.length > 0 && targetUserRows[0].role_name === 'Owner') {
+            return res.status(403).send("Forbidden: The role of the organization owner cannot be changed.");
+        }
+
+        // All checks passed, update the user's role in the database
+        const updateSql = 'UPDATE ORGANIZATION_MEMBERS SET role_id = ? WHERE user_id = ? AND org_id = ?';
+        await dbPool.execute(updateSql, [new_role_id, memberId, orgId]);
+
+        // Redirect back to the members page
+        res.redirect(`/organizations/${orgId}/members`);
+        
+    } catch (error) {
+        console.error("Error updating user role:", error);
+        res.status(500).send("Failed to update user role.");
+    }
+});
 // GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');
