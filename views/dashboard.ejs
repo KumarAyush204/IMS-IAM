@@ -15,6 +15,13 @@
             <% organizations.forEach(function(org) { %>
                 <li>
                     <b><%= org.org_name %></b> - (Your Role: <%= org.role_name %>)
+                    
+                    <form action="/organizations/<%= org.org_id %>/add" method="POST">
+                        <input type="email" name="email" placeholder="Enter registered user's email" required>
+                        <button type="submit">Add Member</button>
+                    </form>
+
+                    <a href="/organizations/<%= org.org_id %>/members">Manage Members</a>
                 </li>
             <% }); %>
         </ul>

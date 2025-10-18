@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Organization Members</title>
+</head>
+<body>
+    <h1>Members of <%= orgName %></h1>
+    <a href="/dashboard">Back to Dashboard</a>
+    <hr>
+    
+    <% if (members.length > 0) { %>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% members.forEach(function(member) { %>
+                    <tr>
+                        <td><%= member.name %></td>
+                        <td><%= member.email %></td>
+                        <td><%= member.role_name %></td>
+                    </tr>
+                <% }); %>
+            </tbody>
+        </table>
+    <% } else { %>
+        <p>This organization has no members.</p>
+    <% } %>
+</body>
+</html>

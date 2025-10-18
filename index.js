@@ -2,8 +2,9 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken'); // ⭐️ Changed
+const jwt =require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 // ### 2. App & Middleware Setup ###
@@ -13,78 +14,70 @@ const PORT = 3000;
 app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use(cookieParser()); // Used to read the token from cookies
+app.use(cookieParser());
+app.use(express.static('public')); // For any static files if needed in the future
 
-// ### 3. Database Connection Pool ###
+// ### 3. Database & Nodemailer Setup ###
 const dbPool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME
 });
 console.log('✅ Database connection pool created.');
 
-// ⭐️ New: Middleware to verify JWT and protect routes
-const authenticateToken = (req, res, next) => {
-    const token = req.cookies.token; // Read token from the cookie
-
-    if (!token) {
-        return res.redirect('/login'); // If no token, user is not logged in
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
     }
+});
+console.log('📧 Nodemailer transporter configured.');
 
+// ### 4. Authentication Middleware ###
+const authenticateToken = (req, res, next) => {
+    const token = req.cookies.token;
+    if (!token) {
+        return res.redirect('/login');
+    }
     try {
-        // Verify the token using the secret key
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded; // Attach the user payload (id, name, email) to the request
-        next(); // Proceed to the protected route
+        req.user = decoded;
+        next();
     } catch (err) {
-        // If token is invalid or expired
         res.clearCookie('token');
         return res.redirect('/login');
     }
 };
 
 // --- Page Routes ---
-
-app.get('/', (req, res) => {
-    // If a valid token cookie exists, redirect to dashboard
-    if (req.cookies.token) {
-        return res.redirect('/dashboard');
-    }
-    res.redirect('/login');
-});
-
-app.get('/register', (req, res) => {
-    res.render('register');
-});
-
-app.get('/login', (req, res) => {
-    res.render('login');
-});
+app.get('/', (req, res) => res.redirect('/dashboard'));
+app.get('/login', (req, res) => res.render('login'));
+app.get('/register', (req, res) => res.render('register'));
 
 // --- API Endpoints ---
 
-// POST /register (No changes needed)
+// POST /register
 app.post('/register', async (req, res) => {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
-        return res.status(400).send('Please provide all fields.');
+        return res.status(400).send('Please fill out all fields.');
     }
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
-        const sql = `INSERT INTO USERS (name, email, password_hash) VALUES (?, ?, ?);`;
-        await dbPool.execute(sql, [name, email, hashedPassword]);
+        await dbPool.execute(`INSERT INTO USERS (name, email, password_hash) VALUES (?, ?, ?);`, [name, email, hashedPassword]);
         res.send('<h1>Registration successful!</h1><p>You can now <a href="/login">log in</a>.</p>');
     } catch (error) {
         if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(409).send('An account with this email already exists.');
+            return res.status(409).send('Error: This email is already registered.');
         }
         console.error("Registration Error:", error);
-        res.status(500).send('An error occurred during registration.');
+        res.status(500).send('Error registering user.');
     }
 });
 
-// ⭐️ Changed: POST /login now creates a JWT and sets it in a cookie
+// POST /login
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -97,25 +90,10 @@ app.post('/login', async (req, res) => {
         }
         const user = rows[0];
         const isMatch = await bcrypt.compare(password, user.password_hash);
-
         if (isMatch) {
-            // Passwords match! Create a JWT payload.
-            const payload = {
-                id: user.user_id,
-                name: user.name,
-                email: user.email
-            };
-
-            // Sign the token with the secret key, setting it to expire in 1 hour
+            const payload = { id: user.user_id, name: user.name, email: user.email };
             const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-            // Send the token in a secure, http-only cookie
-            res.cookie('token', token, {
-                httpOnly: true,
-                secure: false, // Set to true in production (HTTPS)
-                maxAge: 3600000 // 1 hour in milliseconds
-            });
-
+            res.cookie('token', token, { httpOnly: true, maxAge: 3600000 });
             res.redirect('/dashboard');
         } else {
             res.status(401).send('Invalid email or password.');
@@ -126,74 +104,144 @@ app.post('/login', async (req, res) => {
     }
 });
 
+// POST /organizations/create
 app.post('/organizations/create', authenticateToken, async (req, res) => {
     const { org_name } = req.body;
-    const owner_id = req.user.id; // The logged-in user becomes the owner
-
+    const owner_id = req.user.id;
     if (!org_name) {
         return res.status(400).send('Organization name is required.');
     }
-
     let connection;
     try {
-        // Use a transaction to ensure both queries succeed or neither do
         connection = await dbPool.getConnection();
         await connection.beginTransaction();
-
-        // Step 1: Create the organization
         const orgSql = 'INSERT INTO ORGANIZATIONS (org_name, owner_id) VALUES (?, ?)';
         const [orgResult] = await connection.execute(orgSql, [org_name, owner_id]);
         const newOrgId = orgResult.insertId;
-
-        // Step 2: Add the creator as the 'Owner' in the ORGANIZATION_MEMBERS table
-        // The role_id for 'Owner' is 1, as seeded by our init script.
         const ownerRoleId = 1;
         const memberSql = 'INSERT INTO ORGANIZATION_MEMBERS (org_id, user_id, role_id) VALUES (?, ?, ?)';
         await connection.execute(memberSql, [newOrgId, owner_id, ownerRoleId]);
-
-        // If both queries are successful, commit the transaction
         await connection.commit();
-
         res.redirect('/dashboard');
-
     } catch (error) {
-        if (connection) await connection.rollback(); // Rollback on error
+        if (connection) await connection.rollback();
         console.error("Error creating organization:", error);
         res.status(500).send('Failed to create organization.');
     } finally {
-        if (connection) connection.release(); // Release connection back to the pool
+        if (connection) connection.release();
     }
 });
 
-// ⭐️ Changed: Dashboard now fetches and displays the user's organizations
+// POST /organizations/:orgId/add
+app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
+    const { email: memberEmail } = req.body;
+    const { orgId } = req.params;
+    const adderName = req.user.name;
+    if (!memberEmail) {
+        return res.status(400).send('Email is required.');
+    }
+    try {
+        const [users] = await dbPool.execute('SELECT user_id FROM USERS WHERE email = ?', [memberEmail]);
+        if (users.length === 0) {
+            return res.status(404).send('<h1>User Not Found</h1><p>A user with this email is not registered. Please ask them to create an account first.</p><a href="/dashboard">Go Back</a>');
+        }
+        const memberId = users[0].user_id;
+        const [existingMembers] = await dbPool.execute(
+            'SELECT user_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
+            [memberId, orgId]
+        );
+        if (existingMembers.length > 0) {
+            return res.status(409).send('<h1>Already a Member</h1><p>This user is already in the organization.</p><a href="/dashboard">Go Back</a>');
+        }
+        await dbPool.execute(
+            'INSERT INTO ORGANIZATION_MEMBERS (org_id, user_id, role_id) VALUES (?, ?, ?)',
+            [orgId, memberId, 3] // Default role is 'Member' (ID 3)
+        );
+        const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: memberEmail,
+            subject: `You've been added to the organization: ${orgs[0].org_name}`,
+            html: `<h1>You're on the team!</h1><p><b>${adderName}</b> has added you to the "<b>${orgs[0].org_name}</b>" organization.</p><p>You can now log in to access the organization's resources.</p><a href="http://localhost:${PORT}/login">Login Now</a>`
+        };
+        await transporter.sendMail(mailOptions);
+        res.redirect('/dashboard');
+    } catch (error) {
+        console.error("Add Member Error:", error);
+        res.status(500).send('Failed to add member to the organization.');
+    }
+});
+
+// GET /dashboard
 app.get('/dashboard', authenticateToken, async (req, res) => {
     try {
-        // Query to get all organizations the user is a member of, along with their role in each.
         const sql = `
             SELECT o.org_id, o.org_name, r.role_name
             FROM ORGANIZATION_MEMBERS om
             JOIN ORGANIZATIONS o ON om.org_id = o.org_id
             JOIN ROLES r ON om.role_id = r.role_id
             WHERE om.user_id = ?`;
-        
         const [organizations] = await dbPool.execute(sql, [req.user.id]);
-        
-        // Render a new dashboard view, passing the user's data and their list of orgs
         res.render('dashboard', { user: req.user, organizations: organizations });
-
     } catch (error) {
         console.error("Error fetching dashboard data:", error);
         res.status(500).send('Could not load dashboard data.');
     }
 });
 
-// ⭐️ Changed: Logout now clears the token cookie
+// ⭐ New: GET route to show all members of an organization
+app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => {
+    const { orgId } = req.params;
+    const userId = req.user.id;
+
+    try {
+        // Security Check: First, verify the current user is actually a member of this organization.
+        const [membershipCheck] = await dbPool.execute(
+            'SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
+            [userId, orgId]
+        );
+        if (membershipCheck.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+
+        // Fetch the organization's name for the page title
+        const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
+        if (orgs.length === 0) {
+            return res.status(404).send("Organization not found.");
+        }
+        const orgName = orgs[0].org_name;
+
+        // Fetch all members of this organization, along with their roles
+        const membersSql = `
+            SELECT u.name, u.email, r.role_name
+            FROM ORGANIZATION_MEMBERS om
+            JOIN USERS u ON om.user_id = u.user_id
+            JOIN ROLES r ON om.role_id = r.role_id
+            WHERE om.org_id = ?
+            ORDER BY r.role_id, u.name;
+        `;
+        const [members] = await dbPool.execute(membersSql, [orgId]);
+
+        // Render a new view to display the members
+        res.render('org-members', {
+            user: req.user,
+            orgName: orgName,
+            members: members
+        });
+
+    } catch (error) {
+        console.error("Error fetching organization members:", error);
+        res.status(500).send("Failed to retrieve organization members.");
+    }
+});
+
+// GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');
     res.redirect('/login');
 });
 
-// ### 4. Start Server ###
+// ### 5. Start Server ###
 app.listen(PORT, () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
+    console.log(`🚀 Server is running on http://localhost:${PORT}`);
 });
