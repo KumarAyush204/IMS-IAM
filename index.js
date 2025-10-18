@@ -132,6 +132,35 @@ app.post('/organizations/create', authenticateToken, async (req, res) => {
     }
 });
 
+
+app.get('/organizations/:orgId', authenticateToken, async (req, res) => {
+    const { orgId } = req.params;
+    const userId = req.user.id;
+
+    try {
+        // Security: Ensure the user is a member of the org they are trying to view
+        const [membership] = await dbPool.execute(
+            'SELECT org_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
+            [userId, orgId]
+        );
+        if (membership.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+
+        // Fetch organization details
+        const [orgs] = await dbPool.execute('SELECT org_id, org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
+        if (orgs.length === 0) {
+            return res.status(404).send("Organization not found.");
+        }
+
+        res.render('org-management', { user: req.user, org: orgs[0] });
+
+    } catch (error) {
+        console.error("Error fetching organization page:", error);
+        res.status(500).send("Failed to load organization page.");
+    }
+});
+
 // POST /organizations/:orgId/add
 app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
     const { email: memberEmail } = req.body;
@@ -317,6 +346,54 @@ app.post('/organizations/:orgId/members/:memberId/update-role', authenticateToke
         res.status(500).send("Failed to update user role.");
     }
 });
+
+
+// ⭐ New: POST route to handle organization deletion
+app.post('/organizations/:orgId/delete', authenticateToken, async (req, res) => {
+    const { orgId } = req.params;
+    const { confirmation_name } = req.body;
+    const requesterId = req.user.id;
+
+    try {
+        // 🛡️ Security Check 1: Verify the requester is the OWNER of this organization.
+        const roleSql = `
+            SELECT r.role_name FROM ORGANIZATION_MEMBERS om
+            JOIN ROLES r ON om.role_id = r.role_id
+            WHERE om.user_id = ? AND om.org_id = ?`;
+        
+        const [requesterRows] = await dbPool.execute(roleSql, [requesterId, orgId]);
+
+        if (requesterRows.length === 0 || requesterRows[0].role_name !== 'Owner') {
+            return res.status(403).send("Forbidden: Only the organization owner can delete the organization.");
+        }
+
+        // 🛡️ Security Check 2: Verify the typed confirmation name matches the actual name.
+        const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
+        if (orgs.length === 0) {
+            return res.status(404).send("Organization not found.");
+        }
+
+        if (orgs[0].org_name !== confirmation_name) {
+            return res.status(400).send("Confirmation name does not match. Deletion aborted.");
+        }
+
+        // 🗑️ All checks passed. Proceed with deletion.
+        // Because of `ON DELETE CASCADE` in your database schema, deleting the organization
+        // will automatically delete all related teams, members, inventories, etc.
+        await dbPool.execute('DELETE FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
+
+        // Redirect to the dashboard after successful deletion.
+        res.redirect('/dashboard');
+
+    } catch (error) {
+        console.error("Error deleting organization:", error);
+        res.status(500).send("Failed to delete organization.");
+    }
+});
+
+
+
+
 // GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Manage Organization</title>
+</head>
+<body>
+    <h1>Manage: <%= org.org_name %></h1>
+    <a href="/dashboard">Back to Dashboard</a>
+    <hr>
+
+    <a href="/organizations/<%= org.org_id %>/members">View Members</a>
+    <hr>
+
+    <h2>Delete Organization</h2>
+    <p>This action is irreversible and will permanently delete the organization, all its teams, inventories, and member associations.</p>
+    
+    <button id="deleteButton" style="color: red;">Delete this organization</button>
+
+    <div id="confirmationForm" style="display:none; margin-top: 15px; border: 1px solid red; padding: 10px;">
+        <form action="/organizations/<%= org.org_id %>/delete" method="POST">
+            <label for="confirmation_name">To confirm, please type the organization's name: <b><%= org.org_name %></b></label>
+            <br>
+            <input type="text" id="confirmation_name" name="confirmation_name" required>
+            <br><br>
+            <button type="submit" style="color: red;">I understand, permanently delete</button>
+        </form>
+    </div>
+
+    <script>
+        // Simple script to show the confirmation form when the button is clicked
+        document.getElementById('deleteButton').addEventListener('click', function() {
+            document.getElementById('confirmationForm').style.display = 'block';
+            this.style.display = 'none'; // Hide the initial button
+        });
+    </script>
+</body>
+</html>

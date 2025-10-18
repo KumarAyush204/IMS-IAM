@@ -8,7 +8,15 @@
     <h1>Members of <%= orgName %></h1>
     <a href="/dashboard">Back to Dashboard</a>
     <hr>
-    
+
+    <h3>Add New Member</h3>
+    <form action="/organizations/<%= orgId %>/add" method="POST">
+        <input type="email" name="email" placeholder="Enter registered user's email" required>
+        <button type="submit">Add Member</button>
+    </form>
+    <hr>
+
+    <h3>Current Members</h3>
     <% if (members.length > 0) { %>
         <table>
             <thead>
@@ -48,7 +56,30 @@
             </tbody>
         </table>
     <% } else { %>
-        <p>This organization has no members.</p>
+        <p>This organization has no members yet.</p>
     <% } %>
+    
+    <h2>Delete Organization</h2>
+    <p>This action is irreversible and will permanently delete the organization, all its teams, inventories, and member associations.</p>
+    
+    <button id="deleteButton" style="color: red;">Delete this organization</button>
+
+    <div id="confirmationForm" style="display:none; margin-top: 15px; border: 1px solid red; padding: 10px;">
+        <form action="/organizations/<%= orgId %>/delete" method="POST">
+            <label for="confirmation_name">To confirm, please type the organization's name: <b><%= orgName %></b></label>
+            <br>
+            <input type="text" id="confirmation_name" name="confirmation_name" required>
+            <br><br>
+            <button type="submit" style="color: red;">I understand, permanently delete</button>
+        </form>
+    </div>
+
+    <script>
+        // Simple script to show the confirmation form when the button is clicked
+        document.getElementById('deleteButton').addEventListener('click', function() {
+            document.getElementById('confirmationForm').style.display = 'block';
+            this.style.display = 'none'; // Hide the initial button
+        });
+    </script>
 </body>
 </html>
