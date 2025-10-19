@@ -234,6 +234,58 @@ app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
         res.status(500).send('Failed to add member to the organization.');
     }
 });
+
+
+
+// ⭐ New: POST route to handle team creation within an organization
+app.post('/organizations/:orgId/teams/create', authenticateToken, async (req, res) => {
+    const { orgId } = req.params;
+    const { team_name } = req.body;
+    const requesterId = req.user.id;
+
+    if (!team_name) {
+        return res.status(400).send("Team name is required.");
+    }
+
+    try {
+        // Security Check: Verify the user is an Owner or Admin of this organization.
+        const requesterRoleSql = `
+            SELECT r.role_name 
+            FROM ORGANIZATION_MEMBERS om
+            JOIN ROLES r ON om.role_id = r.role_id
+            WHERE om.user_id = ? AND om.org_id = ?`;
+        
+        const [requesterRows] = await dbPool.execute(requesterRoleSql, [requesterId, orgId]);
+
+        if (requesterRows.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+
+        const requesterRole = requesterRows[0].role_name;
+        const allowedRoles = ['Owner', 'Admin'];
+
+        if (!allowedRoles.includes(requesterRole)) {
+            return res.status(403).send("Forbidden: You do not have permission to create teams.");
+        }
+
+        // All checks passed, create the team.
+        const createTeamSql = 'INSERT INTO TEAMS (team_name, org_id) VALUES (?, ?)';
+        await dbPool.execute(createTeamSql, [team_name, orgId]);
+
+        // Redirect back to the members management page.
+        res.redirect(`/organizations/${orgId}/members`);
+
+    } catch (error) {
+        console.error("Error creating team:", error);
+        res.status(500).send("Failed to create team.");
+    }
+});
+
+
+
+
+
+
 // GET /dashboard
 app.get('/dashboard', authenticateToken, async (req, res) => {
     try {
@@ -252,12 +304,13 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
 });
 
 // ⭐ New: GET route to show all members of an organization
+// ⭐ Corrected: This route now correctly fetches the user_id for team members.
 app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => {
     const { orgId } = req.params;
     const userId = req.user.id;
 
     try {
-        // Security Check: Verify the current user is a member of this organization.
+        // Step 1: Security Check - Verify the user is a member of the organization.
         const [membershipCheck] = await dbPool.execute(
             'SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
             [userId, orgId]
@@ -266,36 +319,104 @@ app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => 
             return res.status(403).send("Forbidden: You are not a member of this organization.");
         }
 
-        // Fetch organization name
+        // Step 2: Fetch all primary data in parallel for efficiency.
+        // Get organization details.
         const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
-        if (orgs.length === 0) return res.status(404).send("Organization not found.");
+        if (orgs.length === 0) {
+            return res.status(404).send("Organization not found.");
+        }
         
-        // Fetch all members of this organization, including their current role_id
+        // Get all members of the organization.
         const membersSql = `
-            SELECT u.user_id, u.name, u.email, r.role_name, om.role_id
-            FROM ORGANIZATION_MEMBERS om
-            JOIN USERS u ON om.user_id = u.user_id
-            JOIN ROLES r ON om.role_id = r.role_id
-            WHERE om.org_id = ? ORDER BY r.role_id, u.name;
-        `;
+            SELECT u.user_id, u.name, u.email, r.role_name, om.role_id 
+            FROM ORGANIZATION_MEMBERS om 
+            JOIN USERS u ON om.user_id = u.user_id 
+            JOIN ROLES r ON om.role_id = r.role_id 
+            WHERE om.org_id = ? ORDER BY r.role_id, u.name;`;
         const [members] = await dbPool.execute(membersSql, [orgId]);
+        
+        // Get all possible roles for the 'organization' scope.
+        const [orgRoles] = await dbPool.execute(`SELECT role_id, role_name FROM ROLES WHERE scope = 'organization'`);
+        
+        // Get all teams within the organization.
+        const [teams] = await dbPool.execute('SELECT team_id, team_name FROM TEAMS WHERE org_id = ?', [orgId]);
+        
+        // Get all possible roles for the 'team' scope.
+        const [teamRoles] = await dbPool.execute(`SELECT role_id, role_name FROM ROLES WHERE scope = 'team'`);
 
-        // Fetch all possible roles for the 'organization' scope to populate the dropdown
-        const [orgRoles] = await dbPool.execute(
-            `SELECT role_id, role_name FROM ROLES WHERE scope = 'organization'`
-        );
+        // Step 3: Fetch members for each team and structure the data.
+        const teamsWithMembers = await Promise.all(teams.map(async (team) => {
+            const teamMembersSql = `
+                SELECT u.user_id, u.name, r.role_id, r.role_name
+                FROM TEAM_MEMBERS tm 
+                JOIN USERS u ON tm.user_id = u.user_id
+                JOIN ROLES r ON tm.role_id = r.role_id
+                WHERE tm.team_id = ?`;
+            const [teamMembers] = await dbPool.execute(teamMembersSql, [team.team_id]);
+            
+            // Return a new object for the team that includes its members list.
+            return {
+                ...team,
+                members: teamMembers
+            };
+        }));
 
+        // Step 4: Render the page with all the fetched and structured data.
         res.render('org-members', {
             user: req.user,
             orgName: orgs[0].org_name,
             orgId: orgId,
-            members: members,
-            orgRoles: orgRoles // Pass the roles to the view
+            members: members,       // List of organization members
+            orgRoles: orgRoles,     // List of possible organization roles
+            teams: teamsWithMembers,// List of teams, each with its members
+            teamRoles: teamRoles    // List of possible team roles
         });
 
     } catch (error) {
         console.error("Error fetching organization members:", error);
         res.status(500).send("Failed to retrieve organization members.");
+    }
+});
+app.post('/teams/:teamId/members/:memberId/remove', authenticateToken, async (req, res) => {
+    const { teamId, memberId } = req.params;
+    const { orgId } = req.body; // Pass orgId in a hidden field for redirection
+    const requesterId = req.user.id;
+
+    if (!orgId) {
+        return res.status(400).send("Organization ID is missing.");
+    }
+
+    try {
+        // Security Check: Verify the user making the request is an Owner or Admin of the organization.
+        const requesterRoleSql = `
+            SELECT r.role_name 
+            FROM ORGANIZATION_MEMBERS om
+            JOIN ROLES r ON om.role_id = r.role_id
+            WHERE om.user_id = ? AND om.org_id = ?`;
+        
+        const [requesterRows] = await dbPool.execute(requesterRoleSql, [requesterId, orgId]);
+
+        if (requesterRows.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+
+        const requesterRole = requesterRows[0].role_name;
+        const allowedRoles = ['Owner', 'Admin'];
+
+        if (!allowedRoles.includes(requesterRole)) {
+            return res.status(403).send("Forbidden: You do not have permission to remove team members.");
+        }
+
+        // All checks passed. Delete the user from the TEAM_MEMBERS table.
+        const deleteSql = 'DELETE FROM TEAM_MEMBERS WHERE team_id = ? AND user_id = ?';
+        await dbPool.execute(deleteSql, [teamId, memberId]);
+
+        // Redirect back to the members management page.
+        res.redirect(`/organizations/${orgId}/members`);
+
+    } catch (error) {
+        console.error("Error removing member from team:", error);
+        res.status(500).send("Failed to remove member from team.");
     }
 });
 
@@ -306,39 +427,43 @@ app.post('/organizations/:orgId/members/:memberId/update-role', authenticateToke
     const requesterId = req.user.id;
 
     try {
-        // Security Check 1: Get the role of the person MAKING the request
+        // 🛡️ Security Check: Get the role of the person MAKING the request
         const [requesterRows] = await dbPool.execute(
             'SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?',
             [requesterId, orgId]
         );
 
+        // Debugging log
+        console.log(`SECURITY CHECK (Org Role Update): User ${requesterId} attempting action on org ${orgId}.`);
+
         if (requesterRows.length === 0) {
+            console.log(`-> DENIED: Requester is not a member of this organization.`);
             return res.status(403).send("Forbidden: You are not a member of this organization.");
         }
         
         const requesterRole = requesterRows[0].role_name;
         const allowedRoles = ['Owner', 'Admin'];
 
-        // Security Check 2: Ensure the requester is an Owner or Admin
+        console.log(`-> Requester's role is '${requesterRole}'. Allowed roles: ['Owner', 'Admin'].`);
+
+        // Security Check: Ensure the requester is an Owner or Admin
         if (!allowedRoles.includes(requesterRole)) {
+            console.log(`-> DENIED: Role '${requesterRole}' is not authorized.`);
             return res.status(403).send("Forbidden: You do not have permission to change roles.");
         }
         
-        // Security Check 3: Prevent the Owner's role from being changed by anyone
-        const [targetUserRows] = await dbPool.execute(
-            'SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?',
-            [memberId, orgId]
-        );
+        console.log(`-> ALLOWED: Proceeding with role update.`);
 
+        // Security Check: Prevent the Owner's role from being changed
+        const [targetUserRows] = await dbPool.execute('SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?', [memberId, orgId]);
         if (targetUserRows.length > 0 && targetUserRows[0].role_name === 'Owner') {
             return res.status(403).send("Forbidden: The role of the organization owner cannot be changed.");
         }
 
-        // All checks passed, update the user's role in the database
+        // All checks passed, update the user's role
         const updateSql = 'UPDATE ORGANIZATION_MEMBERS SET role_id = ? WHERE user_id = ? AND org_id = ?';
         await dbPool.execute(updateSql, [new_role_id, memberId, orgId]);
 
-        // Redirect back to the members page
         res.redirect(`/organizations/${orgId}/members`);
         
     } catch (error) {
@@ -392,8 +517,113 @@ app.post('/organizations/:orgId/delete', authenticateToken, async (req, res) => 
 });
 
 
+// ⭐ New: POST route to assign an organization member to a team
+app.post('/organizations/:orgId/members/:memberId/assign-team', authenticateToken, async (req, res) => {
+    const { orgId, memberId } = req.params;
+    const { team_id } = req.body;
+    const requesterId = req.user.id;
 
+    if (!team_id) {
+        return res.status(400).send("Team ID is required.");
+    }
 
+    try {
+        // Security Check: Verify the user making the request is an Owner or Admin.
+        const requesterRoleSql = `
+            SELECT r.role_name 
+            FROM ORGANIZATION_MEMBERS om
+            JOIN ROLES r ON om.role_id = r.role_id
+            WHERE om.user_id = ? AND om.org_id = ?`;
+        
+        const [requesterRows] = await dbPool.execute(requesterRoleSql, [requesterId, orgId]);
+
+        if (requesterRows.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+
+        const requesterRole = requesterRows[0].role_name;
+        const allowedRoles = ['Owner', 'Admin'];
+
+        if (!allowedRoles.includes(requesterRole)) {
+            return res.status(403).send("Forbidden: You do not have permission to assign members to teams.");
+        }
+
+        // Check if the user is already in the team to prevent duplicate entries.
+        const [existing] = await dbPool.execute(
+            'SELECT * FROM TEAM_MEMBERS WHERE user_id = ? AND team_id = ?',
+            [memberId, team_id]
+        );
+        if (existing.length > 0) {
+            // Optionally, you can send a message back. For now, we just redirect.
+            return res.redirect(`/organizations/${orgId}/members`);
+        }
+
+        // All checks passed. Add the user to the team with the default 'Team Member' role (ID 5).
+        const assignSql = 'INSERT INTO TEAM_MEMBERS (team_id, user_id, role_id) VALUES (?, ?, ?)';
+        await dbPool.execute(assignSql, [team_id, memberId, 5]);
+
+        // Redirect back to the members management page.
+        res.redirect(`/organizations/${orgId}/members`);
+
+    } catch (error) {
+        console.error("Error assigning member to team:", error);
+        res.status(500).send("Failed to assign member to team.");
+    }
+});
+// ⭐ New: POST route to update a team member's role
+app.post('/teams/:teamId/members/:memberId/update-role', authenticateToken, async (req, res) => {
+    const { teamId, memberId } = req.params;
+    const { new_team_role_id, orgId } = req.body;
+    const requesterId = req.user.id;
+
+    if (!new_team_role_id || !orgId) {
+        return res.status(400).send("Missing required information.");
+    }
+
+    try {
+        // 🛡️ Security Check: Get the requester's organization-level role
+        const [orgRoleRows] = await dbPool.execute(`SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?`, [requesterId, orgId]);
+
+        console.log(`SECURITY CHECK (Team Role Update): User ${requesterId} attempting action on team ${teamId}.`);
+
+        if (orgRoleRows.length === 0) {
+            console.log(`-> DENIED: Requester is not a member of this organization.`);
+            return res.status(403).send("Forbidden: You are not a member of this organization.");
+        }
+
+        const orgRole = orgRoleRows[0].role_name;
+        const allowedOrgRoles = ['Owner', 'Admin'];
+
+        console.log(`-> Requester's organization role is '${orgRole}'.`);
+
+        // If the requester is an Owner or Admin of the organization, they are allowed
+        if (allowedOrgRoles.includes(orgRole)) {
+            console.log(`-> ALLOWED (as Org Admin/Owner): Proceeding with role update.`);
+        } else {
+            // Otherwise, check if they are a Team Admin for this specific team
+            const [teamRoleRows] = await dbPool.execute(`SELECT r.role_name FROM TEAM_MEMBERS tm JOIN ROLES r ON tm.role_id = r.role_id WHERE tm.user_id = ? AND tm.team_id = ?`, [requesterId, teamId]);
+            const teamRole = teamRoleRows.length > 0 ? teamRoleRows[0].role_name : null;
+            
+            console.log(`-> Requester's team role is '${teamRole}'.`);
+
+            if (teamRole !== 'Team Admin') {
+                console.log(`-> DENIED: Not an Org Admin/Owner or a Team Admin.`);
+                return res.status(403).send("Forbidden: You do not have permission to change roles in this team.");
+            }
+            console.log(`-> ALLOWED (as Team Admin): Proceeding with role update.`);
+        }
+
+        // All security checks passed, update the role
+        const updateSql = 'UPDATE TEAM_MEMBERS SET role_id = ? WHERE team_id = ? AND user_id = ?';
+        await dbPool.execute(updateSql, [new_team_role_id, teamId, memberId]);
+
+        res.redirect(`/organizations/${orgId}/members`);
+
+    } catch (error) {
+        console.error("Error updating team role:", error);
+        res.status(500).send("Failed to update team member role.");
+    }
+});
 // GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');

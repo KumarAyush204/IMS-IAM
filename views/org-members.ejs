@@ -5,9 +5,65 @@
     <title>Organization Members</title>
 </head>
 <body>
-    <h1>Members of <%= orgName %></h1>
+    <h1>Manage: <%= orgName %></h1>
     <a href="/dashboard">Back to Dashboard</a>
     <hr>
+    
+    <h2>Team Management</h2>
+    
+    <h3>Create a New Team</h3>
+    <form action="/organizations/<%= orgId %>/teams/create" method="POST">
+        <label for="team_name">Team Name:</label>
+        <input type="text" id="team_name" name="team_name" required>
+        <button type="submit">Create Team</button>
+    </form>
+
+  
+    
+<h3>Existing Teams</h3>
+<% if (teams.length > 0) { %>
+    <ul>
+        <% teams.forEach(function(team) { %>
+            <li>
+                <b><%= team.team_name %></b>
+                
+                <% if (team.members && team.members.length > 0) { %>
+                    <ul>
+                        <% team.members.forEach(function(member) { %>
+                            <li>
+                                <%= member.name %> - (Role: <%= member.role_name %>)
+                                
+                                <form action="/teams/<%= team.team_id %>/members/<%= member.user_id %>/update-role" method="POST" style="display: inline; margin-left: 10px;">
+                                    <input type="hidden" name="orgId" value="<%= orgId %>">
+                                    <select name="new_team_role_id">
+                                        <% teamRoles.forEach(function(role) { %>
+                                            <option value="<%= role.role_id %>" <%= member.role_id === role.role_id ? 'selected' : '' %>>
+                                                <%= role.role_name %>
+                                            </option>
+                                        <% }); %>
+                                    </select>
+                                    <button type="submit">Update</button>
+                                </form>
+
+                                <form action="/teams/<%= team.team_id %>/members/<%= member.user_id %>/remove" method="POST" style="display: inline;">
+                                    <input type="hidden" name="orgId" value="<%= orgId %>">
+                                    <button type="submit">Remove</button>
+                                </form>
+                            </li>
+                        <% }); %>
+                    </ul>
+                <% } else { %>
+                    <p>No members assigned to this team yet.</p>
+                <% } %>
+            </li>
+        <% }); %>
+    </ul>
+<% } else { %>
+    <p>No teams have been created for this organization yet.</p>
+<% } %>
+<hr>
+    
+    <h2>Member Management</h2>
 
     <h3>Add New Member</h3>
     <form action="/organizations/<%= orgId %>/add" method="POST">
@@ -24,8 +80,8 @@
                     <th>Name</th>
                     <th>Email</th>
                     <th>Current Role</th>
-                    <th>Action</th>
-                </tr>
+                    <th>Update Role</th>
+                    <th>Assign to Team</th> </tr>
             </thead>
             <tbody>
                 <% members.forEach(function(member) { %>
@@ -51,6 +107,24 @@
                                 No actions available
                             <% } %>
                         </td>
+                        <td>
+                            <% if (member.role_name !== 'Owner' && teams.length > 0) { %>
+                                <form action="/organizations/<%= orgId %>/members/<%= member.user_id %>/assign-team" method="POST">
+                                    <select name="team_id">
+                                        <% teams.forEach(function(team) { %>
+                                            <option value="<%= team.team_id %>">
+                                                <%= team.team_name %>
+                                            </option>
+                                        <% }); %>
+                                    </select>
+                                    <button type="submit">Assign</button>
+                                </form>
+                            <% } else if (teams.length === 0) { %>
+                                Create a team first
+                            <% } else { %>
+                                N/A for Owner
+                            <% } %>
+                        </td>
                     </tr>
                 <% }); %>
             </tbody>
@@ -58,6 +132,8 @@
     <% } else { %>
         <p>This organization has no members yet.</p>
     <% } %>
+    
+    <hr>
     
     <h2>Delete Organization</h2>
     <p>This action is irreversible and will permanently delete the organization, all its teams, inventories, and member associations.</p>
@@ -75,10 +151,9 @@
     </div>
 
     <script>
-        // Simple script to show the confirmation form when the button is clicked
         document.getElementById('deleteButton').addEventListener('click', function() {
             document.getElementById('confirmationForm').style.display = 'block';
-            this.style.display = 'none'; // Hide the initial button
+            this.style.display = 'none';
         });
     </script>
 </body>
