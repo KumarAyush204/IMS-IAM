@@ -838,6 +838,53 @@ app.post('/teams/:teamId/inventories/create', authenticateToken, async (req, res
     }
 });
 
+// ⭐ New: POST route to handle inventory deletion
+app.post('/inventories/:inventoryId/delete', authenticateToken, async (req, res) => {
+    const { inventoryId } = req.params;
+    // New confirmation_name field from the form
+    const { teamId, confirmation_name } = req.body;
+    const requesterId = req.user.id;
+
+    if (!teamId || !confirmation_name) {
+        return res.status(400).send("Missing required information.");
+    }
+
+    try {
+        // --- Security Check 1: Verify the user has permission (Owner, Admin, or Team Admin) ---
+        const [teams] = await dbPool.execute('SELECT org_id FROM TEAMS WHERE team_id = ?', [teamId]);
+        if (teams.length === 0) return res.status(404).send("Associated team not found.");
+        const orgId = teams[0].org_id;
+
+        const [orgRoleRows] = await dbPool.execute(`SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?`, [requesterId, orgId]);
+        const [teamRoleRows] = await dbPool.execute(`SELECT r.role_name FROM TEAM_MEMBERS tm JOIN ROLES r ON tm.role_id = r.role_id WHERE tm.user_id = ? AND tm.team_id = ?`, [requesterId, teamId]);
+        
+        const orgRole = orgRoleRows.length > 0 ? orgRoleRows[0].role_name : null;
+        const teamRole = teamRoleRows.length > 0 ? teamRoleRows[0].role_name : null;
+
+        if (orgRole !== 'Owner' && orgRole !== 'Admin' && teamRole !== 'Team Admin') {
+            return res.status(403).send("Forbidden: You do not have permission to delete inventories for this team.");
+        }
+
+        // --- 🛡️ Security Check 2: Verify the typed name matches the actual inventory name ---
+        const [inventories] = await dbPool.execute('SELECT inventory_name FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
+        if (inventories.length === 0) {
+            return res.status(404).send("Inventory not found.");
+        }
+
+        if (inventories[0].inventory_name !== confirmation_name) {
+            return res.status(400).send("Confirmation name does not match. Deletion aborted.");
+        }
+
+        // All checks passed. Proceed with deletion.
+        await dbPool.execute('DELETE FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
+
+        res.redirect(`/teams/${teamId}`);
+
+    } catch (error) {
+        console.error("Error deleting inventory:", error);
+        res.status(500).send("Failed to delete inventory.");
+    }
+});
 // GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');
