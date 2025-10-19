@@ -35,6 +35,19 @@
             <button type="submit">Create Inventory</button>
         </form>
     <% } %>
-
+<hr>
+    
+    <h2>Assigned Inventories</h2>
+<% if (inventories.length > 0) { %>
+    <ul>
+        <% inventories.forEach(function(inventory) { %>
+            <li>
+                <a href="/inventories/<%= inventory.inventory_id %>?teamId=<%= team.team_id %>"><%= inventory.inventory_name %></a>
+            </li>
+        <% }); %>
+    </ul>
+<% } else { %>
+    <p>This team has not been assigned any inventories yet.</p>
+<% } %>
 </body>
 </html>

@@ -629,38 +629,47 @@ app.get('/teams/:teamId', authenticateToken, async (req, res) => {
     const requesterId = req.user.id;
 
     try {
-        // ⭐ FIX: Added 'team_id' to the SELECT statement
-        const [teams] = await dbPool.execute('SELECT team_id, team_name, org_id FROM TEAMS WHERE team_id = ?', [teamId]);
+        // Step 1: Fetch core team details, ensuring team_id is included.
+        const [teams] = await dbPool.execute(
+            'SELECT team_id, team_name, org_id FROM TEAMS WHERE team_id = ?', 
+            [teamId]
+        );
         if (teams.length === 0) {
             return res.status(404).send("Team not found.");
         }
         const team = teams[0];
 
-        // Security Check: Verify the user is a member of this team's organization
-        const [orgMembership] = await dbPool.execute('SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?', [requesterId, team.org_id]);
+        // Step 2: Security Check - Verify the user is part of the team's parent organization.
+        const [orgMembership] = await dbPool.execute(
+            'SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?', 
+            [requesterId, team.org_id]
+        );
         if (orgMembership.length === 0) {
             return res.status(403).send("Forbidden: You are not a member of this team's organization.");
         }
         
-        // Fetch inventories assigned to this specific team
+        // Step 3: Fetch the inventories assigned specifically to this team.
         const inventoriesSql = `
-            SELECT i.inventory_name 
+            SELECT i.inventory_id, i.inventory_name 
             FROM INVENTORY_ASSIGNMENTS ia 
             JOIN INVENTORIES i ON ia.inventory_id = i.inventory_id 
             WHERE ia.team_id = ?`;
         const [inventories] = await dbPool.execute(inventoriesSql, [teamId]);
 
-        // Permission Check for displaying the create form
+        // Step 4: Permission Check - Determine if the user has admin rights to create new inventories.
+        // This checks if they are an Owner/Admin of the organization OR a Team Admin of this specific team.
         const [orgRoleRows] = await dbPool.execute(`SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?`, [requesterId, team.org_id]);
         const [teamRoleRows] = await dbPool.execute(`SELECT r.role_name FROM TEAM_MEMBERS tm JOIN ROLES r ON tm.role_id = r.role_id WHERE tm.user_id = ? AND tm.team_id = ?`, [requesterId, teamId]);
         
         const orgRole = orgRoleRows.length > 0 ? orgRoleRows[0].role_name : null;
         const teamRole = teamRoleRows.length > 0 ? teamRoleRows[0].role_name : null;
+        
         const userIsAdmin = (orgRole === 'Owner' || orgRole === 'Admin' || teamRole === 'Team Admin');
 
+        // Step 5: Render the page with all the necessary data.
         res.render('team-management', {
             user: req.user,
-            team: team, // This 'team' object now correctly contains the team_id
+            team: team, // This object now correctly contains team.team_id
             orgId: team.org_id,
             inventories: inventories,
             userIsAdmin: userIsAdmin
@@ -671,6 +680,116 @@ app.get('/teams/:teamId', authenticateToken, async (req, res) => {
         res.status(500).send("Failed to load page.");
     }
 });
+
+app.post('/inventories/:inventoryId/items/create', authenticateToken, async (req, res) => {
+    const { inventoryId } = req.params;
+    const { item_name, quantity, threshold, teamId } = req.body;
+    const requesterId = req.user.id;
+
+    // (The same security check as the GET route)
+    const securitySql = `SELECT ia.team_id FROM INVENTORY_ASSIGNMENTS ia JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id WHERE ia.inventory_id = ? AND tm.user_id = ? AND ia.team_id = ?`;
+    const [permission] = await dbPool.execute(securitySql, [inventoryId, requesterId, teamId]);
+    if (permission.length === 0) return res.status(403).send("Forbidden...");
+
+    let connection;
+    try {
+        connection = await dbPool.getConnection();
+        await connection.beginTransaction();
+
+        // 1. Insert the new item
+        const itemSql = 'INSERT INTO INVENTORY_ITEMS (inventory_id, item_name, quantity, threshold) VALUES (?, ?, ?, ?)';
+        const [itemResult] = await connection.execute(itemSql, [inventoryId, item_name, quantity, threshold]);
+        const newItemId = itemResult.insertId;
+
+        // 2. Log the creation in MOVEMENT_LOGS
+        const logSql = 'INSERT INTO MOVEMENT_LOGS (item_id, user_id, action, quantity_change, notes) VALUES (?, ?, ?, ?, ?)';
+        await connection.execute(logSql, [newItemId, requesterId, 'add', quantity, 'Item created']);
+
+        await connection.commit();
+        res.redirect(`/inventories/${inventoryId}?teamId=${teamId}`);
+    } catch (error) {
+        if (connection) await connection.rollback();
+        console.error("Error creating item:", error);
+        res.status(500).send("Failed to create item.");
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+
+app.post('/items/:itemId/update-stock', authenticateToken, async (req, res) => {
+    const { itemId } = req.params;
+    const { quantity_change, action, inventoryId, teamId } = req.body;
+    const requesterId = req.user.id;
+
+    // (The same security check as the GET route)
+    const securitySql = `SELECT ia.team_id FROM INVENTORY_ASSIGNMENTS ia JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id WHERE ia.inventory_id = ? AND tm.user_id = ? AND ia.team_id = ?`;
+    const [permission] = await dbPool.execute(securitySql, [inventoryId, requesterId, teamId]);
+    if (permission.length === 0) return res.status(403).send("Forbidden...");
+
+    let connection;
+    try {
+        const change = parseInt(quantity_change, 10);
+        if (isNaN(change) || change <= 0) return res.status(400).send("Invalid quantity.");
+
+        const operator = action === 'add' ? '+' : '-';
+        const finalChange = action === 'add' ? change : -change;
+
+        connection = await dbPool.getConnection();
+        await connection.beginTransaction();
+
+        // 1. Update the quantity in the INVENTORY_ITEMS table
+        const updateSql = `UPDATE INVENTORY_ITEMS SET quantity = quantity ${operator} ? WHERE item_id = ?`;
+        await connection.execute(updateSql, [change, itemId]);
+
+        // 2. Log the movement
+        const logSql = 'INSERT INTO MOVEMENT_LOGS (item_id, user_id, action, quantity_change) VALUES (?, ?, ?, ?)';
+        await connection.execute(logSql, [itemId, requesterId, action, finalChange]);
+
+        await connection.commit();
+        res.redirect(`/inventories/${inventoryId}?teamId=${teamId}`);
+    } catch (error) {
+        if (connection) await connection.rollback();
+        console.error("Error updating stock:", error);
+        res.status(500).send("Failed to update stock.");
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+app.get('/inventories/:inventoryId', authenticateToken, async (req, res) => {
+    const { inventoryId } = req.params;
+    const { teamId } = req.query; // Get teamId from the query string for the back link
+    const requesterId = req.user.id;
+
+    try {
+        // Security Check: Verify the user is a member of the team assigned to this inventory
+        const securitySql = `
+            SELECT ia.team_id FROM INVENTORY_ASSIGNMENTS ia
+            JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id
+            WHERE ia.inventory_id = ? AND tm.user_id = ? AND ia.team_id = ?`;
+        const [permission] = await dbPool.execute(securitySql, [inventoryId, requesterId, teamId]);
+        if (permission.length === 0) {
+            return res.status(403).send("Forbidden: You do not have access to this inventory.");
+        }
+
+        // Fetch inventory details and all items within it
+        const [inventories] = await dbPool.execute('SELECT inventory_id, inventory_name FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
+        if (inventories.length === 0) return res.status(404).send("Inventory not found.");
+        
+        const [items] = await dbPool.execute('SELECT * FROM INVENTORY_ITEMS WHERE inventory_id = ? ORDER BY item_name', [inventoryId]);
+
+        res.render('inventory-management', {
+            inventory: inventories[0],
+            items: items,
+            teamId: teamId
+        });
+    } catch (error) {
+        console.error("Error fetching inventory page:", error);
+        res.status(500).send("Failed to load inventory page.");
+    }
+});
+
 
 // ⭐ New: POST route to handle inventory creation for a team
 app.post('/teams/:teamId/inventories/create', authenticateToken, async (req, res) => {

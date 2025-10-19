@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Manage Inventory</title>
+</head>
+<body>
+    <h1>Manage Inventory: <%= inventory.inventory_name %></h1>
+    <a href="/teams/<%= teamId %>">Back to Team Management</a>
+    <hr>
+
+    <h2>Add New Item</h2>
+    <form action="/inventories/<%= inventory.inventory_id %>/items/create" method="POST">
+        <input type="hidden" name="teamId" value="<%= teamId %>">
+        <label for="item_name">Item Name:</label>
+        <input type="text" id="item_name" name="item_name" required>
+        <label for="quantity">Initial Quantity:</label>
+        <input type="number" id="quantity" name="quantity" min="0" value="0" required>
+        <label for="threshold">Alert Threshold:</label>
+        <input type="number" id="threshold" name="threshold" min="0" value="10" required>
+        <button type="submit">Add Item</button>
+    </form>
+    <hr>
+
+    <h2>Existing Items</h2>
+    <% if (items.length > 0) { %>
+        <table>
+            <thead>
+                <tr>
+                    <th>Item Name</th>
+                    <th>Current Quantity</th>
+                    <th>Threshold</th>
+                    <th>Update Stock</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% items.forEach(function(item) { %>
+                    <tr>
+                        <td><%= item.item_name %></td>
+                        <td><%= item.quantity %></td>
+                        <td><%= item.threshold %></td>
+                        <td>
+                            <form action="/items/<%= item.item_id %>/update-stock" method="POST">
+                                <input type="hidden" name="inventoryId" value="<%= inventory.inventory_id %>">
+                                <input type="hidden" name="teamId" value="<%= teamId %>">
+                                <input type="number" name="quantity_change" min="1" required>
+                                <select name="action">
+                                    <option value="add">Add</option>
+                                    <option value="remove">Remove</option>
+                                </select>
+                                <button type="submit">Update</button>
+                            </form>
+                        </td>
+                    </tr>
+                <% }); %>
+            </tbody>
+        </table>
+    <% } else { %>
+        <p>No items have been added to this inventory yet.</p>
+    <% } %>
+</body>
+</html>
