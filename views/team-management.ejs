@@ -1,0 +1,40 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Manage Team</title>
+</head>
+<body>
+    <h1>Manage Team: <%= team.team_name %></h1>
+    <a href="/organizations/<%= orgId %>/members">Back to Organization</a>
+    <hr>
+
+    <h2>Assigned Inventories</h2>
+    <% if (inventories.length > 0) { %>
+        <ul>
+            <% inventories.forEach(function(inventory) { %>
+                <li><%= inventory.inventory_name %></li>
+            <% }); %>
+        </ul>
+    <% } else { %>
+        <p>This team has not been assigned any inventories yet.</p>
+    <% } %>
+
+    <hr>
+
+    <% if (userIsAdmin) { %>
+        <h2>Create New Inventory for this Team</h2>
+        <form action="/teams/<%= team.team_id %>/inventories/create" method="POST">
+            <input type="hidden" name="orgId" value="<%= orgId %>">
+            <div>
+                <label for="inventory_name">Inventory Name:</label>
+                <input type="text" id="inventory_name" name="inventory_name" required>
+            </div>
+            <br>
+            <button type="submit">Create Inventory</button>
+        </form>
+    <% } %>
+
+</body>
+</html>

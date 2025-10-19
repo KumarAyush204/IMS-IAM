@@ -21,46 +21,46 @@
   
     
 <h3>Existing Teams</h3>
-<% if (teams.length > 0) { %>
-    <ul>
-        <% teams.forEach(function(team) { %>
-            <li>
-                <b><%= team.team_name %></b>
-                
-                <% if (team.members && team.members.length > 0) { %>
-                    <ul>
-                        <% team.members.forEach(function(member) { %>
-                            <li>
-                                <%= member.name %> - (Role: <%= member.role_name %>)
-                                
-                                <form action="/teams/<%= team.team_id %>/members/<%= member.user_id %>/update-role" method="POST" style="display: inline; margin-left: 10px;">
-                                    <input type="hidden" name="orgId" value="<%= orgId %>">
-                                    <select name="new_team_role_id">
-                                        <% teamRoles.forEach(function(role) { %>
-                                            <option value="<%= role.role_id %>" <%= member.role_id === role.role_id ? 'selected' : '' %>>
-                                                <%= role.role_name %>
-                                            </option>
-                                        <% }); %>
-                                    </select>
-                                    <button type="submit">Update</button>
-                                </form>
+    <% if (teams.length > 0) { %>
+        <ul>
+            <% teams.forEach(function(team) { %>
+                <li>
+                    <b><a href="/teams/<%= team.team_id %>"><%= team.team_name %></a></b>
+                    
+                    <% if (team.members && team.members.length > 0) { %>
+                        <ul>
+                            <% team.members.forEach(function(member) { %>
+                                <li>
+                                    <%= member.name %> - (Role: <%= member.role_name %>)
+                                    
+                                    <form action="/teams/<%= team.team_id %>/members/<%= member.user_id %>/update-role" method="POST" style="display: inline; margin-left: 10px;">
+                                        <input type="hidden" name="orgId" value="<%= orgId %>">
+                                        <select name="new_team_role_id">
+                                            <% teamRoles.forEach(function(role) { %>
+                                                <option value="<%= role.role_id %>" <%= member.role_id === role.role_id ? 'selected' : '' %>>
+                                                    <%= role.role_name %>
+                                                </option>
+                                            <% }); %>
+                                        </select>
+                                        <button type="submit">Update</button>
+                                    </form>
 
-                                <form action="/teams/<%= team.team_id %>/members/<%= member.user_id %>/remove" method="POST" style="display: inline;">
-                                    <input type="hidden" name="orgId" value="<%= orgId %>">
-                                    <button type="submit">Remove</button>
-                                </form>
-                            </li>
-                        <% }); %>
-                    </ul>
-                <% } else { %>
-                    <p>No members assigned to this team yet.</p>
-                <% } %>
-            </li>
-        <% }); %>
-    </ul>
-<% } else { %>
-    <p>No teams have been created for this organization yet.</p>
-<% } %>
+                                    <form action="/teams/<%= team.team_id %>/members/<%= member.user_id %>/remove" method="POST" style="display: inline;">
+                                        <input type="hidden" name="orgId" value="<%= orgId %>">
+                                        <button type="submit">Remove</button>
+                                    </form>
+                                </li>
+                            <% }); %>
+                        </ul>
+                    <% } else { %>
+                        <p>No members assigned to this team yet.</p>
+                    <% } %>
+                </li>
+            <% }); %>
+        </ul>
+    <% } else { %>
+        <p>No teams have been created for this organization yet.</p>
+    <% } %>
 <hr>
     
     <h2>Member Management</h2>

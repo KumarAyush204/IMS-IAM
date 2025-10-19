@@ -624,6 +624,101 @@ app.post('/teams/:teamId/members/:memberId/update-role', authenticateToken, asyn
         res.status(500).send("Failed to update team member role.");
     }
 });
+app.get('/teams/:teamId', authenticateToken, async (req, res) => {
+    const { teamId } = req.params;
+    const requesterId = req.user.id;
+
+    try {
+        // ⭐ FIX: Added 'team_id' to the SELECT statement
+        const [teams] = await dbPool.execute('SELECT team_id, team_name, org_id FROM TEAMS WHERE team_id = ?', [teamId]);
+        if (teams.length === 0) {
+            return res.status(404).send("Team not found.");
+        }
+        const team = teams[0];
+
+        // Security Check: Verify the user is a member of this team's organization
+        const [orgMembership] = await dbPool.execute('SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?', [requesterId, team.org_id]);
+        if (orgMembership.length === 0) {
+            return res.status(403).send("Forbidden: You are not a member of this team's organization.");
+        }
+        
+        // Fetch inventories assigned to this specific team
+        const inventoriesSql = `
+            SELECT i.inventory_name 
+            FROM INVENTORY_ASSIGNMENTS ia 
+            JOIN INVENTORIES i ON ia.inventory_id = i.inventory_id 
+            WHERE ia.team_id = ?`;
+        const [inventories] = await dbPool.execute(inventoriesSql, [teamId]);
+
+        // Permission Check for displaying the create form
+        const [orgRoleRows] = await dbPool.execute(`SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?`, [requesterId, team.org_id]);
+        const [teamRoleRows] = await dbPool.execute(`SELECT r.role_name FROM TEAM_MEMBERS tm JOIN ROLES r ON tm.role_id = r.role_id WHERE tm.user_id = ? AND tm.team_id = ?`, [requesterId, teamId]);
+        
+        const orgRole = orgRoleRows.length > 0 ? orgRoleRows[0].role_name : null;
+        const teamRole = teamRoleRows.length > 0 ? teamRoleRows[0].role_name : null;
+        const userIsAdmin = (orgRole === 'Owner' || orgRole === 'Admin' || teamRole === 'Team Admin');
+
+        res.render('team-management', {
+            user: req.user,
+            team: team, // This 'team' object now correctly contains the team_id
+            orgId: team.org_id,
+            inventories: inventories,
+            userIsAdmin: userIsAdmin
+        });
+
+    } catch (error) {
+        console.error("Error fetching team management page:", error);
+        res.status(500).send("Failed to load page.");
+    }
+});
+
+// ⭐ New: POST route to handle inventory creation for a team
+app.post('/teams/:teamId/inventories/create', authenticateToken, async (req, res) => {
+    const { teamId } = req.params;
+    const { inventory_name, orgId } = req.body;
+    const requesterId = req.user.id;
+
+    if (!inventory_name || !orgId) {
+        return res.status(400).send("Missing required information.");
+    }
+
+    let connection;
+    try {
+        // Security Check (same as above): Verify user is an Org Owner/Admin or Team Admin
+        const [orgRoleRows] = await dbPool.execute(`SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?`, [requesterId, orgId]);
+        const [teamRoleRows] = await dbPool.execute(`SELECT r.role_name FROM TEAM_MEMBERS tm JOIN ROLES r ON tm.role_id = r.role_id WHERE tm.user_id = ? AND tm.team_id = ?`, [requesterId, teamId]);
+        const orgRole = orgRoleRows.length > 0 ? orgRoleRows[0].role_name : null;
+        const teamRole = teamRoleRows.length > 0 ? teamRoleRows[0].role_name : null;
+
+        if (orgRole !== 'Owner' && orgRole !== 'Admin' && teamRole !== 'Team Admin') {
+            return res.status(403).send("Forbidden: You do not have permission to create inventories.");
+        }
+
+        // Use a transaction for data integrity
+        connection = await dbPool.getConnection();
+        await connection.beginTransaction();
+
+        // 1. Create the inventory at the organization level
+        const inventorySql = 'INSERT INTO INVENTORIES (inventory_name, org_id) VALUES (?, ?)';
+        const [invResult] = await connection.execute(inventorySql, [inventory_name, orgId]);
+        const newInventoryId = invResult.insertId;
+
+        // 2. Assign the new inventory to this specific team
+        const assignmentSql = 'INSERT INTO INVENTORY_ASSIGNMENTS (inventory_id, team_id) VALUES (?, ?)';
+        await connection.execute(assignmentSql, [newInventoryId, teamId]);
+
+        await connection.commit();
+        res.redirect(`/teams/${teamId}`);
+
+    } catch (error) {
+        if (connection) await connection.rollback();
+        console.error("Error creating inventory:", error);
+        res.status(500).send("Failed to create inventory.");
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
 // GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');
