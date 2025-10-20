@@ -153,7 +153,7 @@ app.get('/organizations/:orgId', authenticateToken, async (req, res) => {
             return res.status(404).send("Organization not found.");
         }
 
-        res.render('org-management', { user: req.user, org: orgs[0] });
+        res.render('org-members', { user: req.user, org: orgs[0] });
 
     } catch (error) {
         console.error("Error fetching organization page:", error);
