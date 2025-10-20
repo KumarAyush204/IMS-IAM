@@ -721,59 +721,193 @@ app.post('/items/:itemId/update-stock', authenticateToken, async (req, res) => {
     const { itemId } = req.params;
     const { quantity_change, action, inventoryId, teamId } = req.body;
     const requesterId = req.user.id;
+    const requesterName = req.user.name;
 
-    // (The same security check as the GET route)
-    const securitySql = `SELECT ia.team_id FROM INVENTORY_ASSIGNMENTS ia JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id WHERE ia.inventory_id = ? AND tm.user_id = ? AND ia.team_id = ?`;
-    const [permission] = await dbPool.execute(securitySql, [inventoryId, requesterId, teamId]);
-    if (permission.length === 0) return res.status(403).send("Forbidden...");
+    // Input validation
+    if (!inventoryId || !teamId || !quantity_change || !action) {
+        return res.status(400).send("Missing required information.");
+    }
+    const change = parseInt(quantity_change, 10);
+    if (isNaN(change) || change <= 0) {
+        return res.status(400).send("Invalid quantity change.");
+    }
 
     let connection;
     try {
-        const change = parseInt(quantity_change, 10);
-        if (isNaN(change) || change <= 0) return res.status(400).send("Invalid quantity.");
-
-        const operator = action === 'add' ? '+' : '-';
-        const finalChange = action === 'add' ? change : -change;
+        // --- Security Check (remains the same) ---
+        const [invOrg] = await dbPool.execute('SELECT org_id FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
+        if (invOrg.length === 0) return res.status(404).send("Inventory not found.");
+        const orgId = invOrg[0].org_id;
+        const secureCheckSql = `SELECT tm.user_id FROM TEAM_MEMBERS tm JOIN INVENTORY_ASSIGNMENTS ia ON tm.team_id = ia.team_id WHERE tm.user_id = ? AND ia.inventory_id = ? AND tm.team_id = ?`;
+        const [permissionRows] = await dbPool.execute(secureCheckSql, [requesterId, inventoryId, teamId]);
+        if (permissionRows.length === 0) return res.status(403).send("Forbidden...");
+        // --- End Security Check ---
 
         connection = await dbPool.getConnection();
         await connection.beginTransaction();
 
-        // 1. Update the quantity in the INVENTORY_ITEMS table
-        const updateSql = `UPDATE INVENTORY_ITEMS SET quantity = quantity ${operator} ? WHERE item_id = ?`;
-        await connection.execute(updateSql, [change, itemId]);
+        // 1. ⭐ Get current quantity and threshold BEFORE the update
+        const [currentItemStateRows] = await connection.execute(
+            'SELECT quantity, threshold FROM INVENTORY_ITEMS WHERE item_id = ?',
+            [itemId]
+        );
+        if (currentItemStateRows.length === 0) {
+            await connection.rollback();
+            return res.status(404).send("Item not found.");
+        }
+        const originalQuantity = currentItemStateRows[0].quantity;
+        const threshold = currentItemStateRows[0].threshold;
 
-        // 2. Log the movement
+        // 2. Update the quantity
+        const operator = action === 'add' ? '+' : '-';
+        const updateSql = `UPDATE INVENTORY_ITEMS SET quantity = quantity ${operator} ? WHERE item_id = ?`;
+        const [updateResult] = await connection.execute(updateSql, [change, itemId]);
+
+        // Check update success
+        if (updateResult.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(404).send("Item not found or stock update failed.");
+        }
+
+        // 3. Get the NEW quantity AFTER update
+        const [newItemStateRows] = await connection.execute(
+            'SELECT quantity FROM INVENTORY_ITEMS WHERE item_id = ?',
+            [itemId]
+        );
+        const newQuantity = newItemStateRows[0].quantity;
+
+        // Check for negative stock
+        if (newQuantity < 0) {
+            await connection.rollback();
+            return res.status(400).send("Stock cannot go below zero.");
+        }
+
+        // 4. Log the movement
+        const finalChange = action === 'add' ? change : -change;
         const logSql = 'INSERT INTO MOVEMENT_LOGS (item_id, user_id, action, quantity_change) VALUES (?, ?, ?, ?)';
         await connection.execute(logSql, [itemId, requesterId, action, finalChange]);
 
+        // 5. Commit the transaction
         await connection.commit();
+        connection.release(); // Release connection
+
+        // --- ⭐ Updated: Notification Logic ---
+        try {
+            // Get item name and inventory name for emails
+            const itemDetailsSql = `
+                SELECT i.item_name, inv.inventory_name, inv.org_id
+                FROM INVENTORY_ITEMS i
+                JOIN INVENTORIES inv ON i.inventory_id = inv.inventory_id
+                WHERE i.item_id = ?`;
+            const [itemDetailsRows] = await dbPool.execute(itemDetailsSql, [itemId]);
+            const item = itemDetailsRows[0];
+
+            // Find Admins/Owner
+            const adminEmailsSql = `
+                SELECT u.email FROM ORGANIZATION_MEMBERS om
+                JOIN USERS u ON om.user_id = u.user_id
+                WHERE om.org_id = ? AND om.role_id IN (1, 2)`; // 1=Owner, 2=Admin
+            const [adminRows] = await dbPool.execute(adminEmailsSql, [item.org_id]);
+            const adminEmails = adminRows.map(row => row.email);
+
+            if (adminEmails.length > 0) {
+                // Condition 1: Check for Low Stock
+                if (newQuantity <= threshold) {
+                    console.log(`Threshold breached for item "${item.item_name}". Notifying admins...`);
+                    const mailOptions = {
+                        from: process.env.EMAIL_USER,
+                        to: adminEmails.join(', '),
+                        subject: `Low Stock Alert: ${item.item_name}`,
+                        html: `<h1>Low Stock Alert</h1><p>Stock for "<b>${item.item_name}</b>" in "<b>${item.inventory_name}</b>" is low.</p><ul><li>Current Quantity: <b>${newQuantity}</b></li><li>Threshold: <b>${threshold}</b></li><li>Last updated by: ${requesterName}</li></ul>`
+                    };
+                    await transporter.sendMail(mailOptions);
+                    console.log(`Low stock notification sent to: ${adminEmails.join(', ')}`);
+
+                // Condition 2: Check if stock was low/threshold AND is now above threshold
+                } else if (originalQuantity <= threshold && newQuantity > threshold) {
+                    console.log(`Stock restored for item "${item.item_name}". Notifying admins...`);
+                    const mailOptions = {
+                        from: process.env.EMAIL_USER,
+                        to: adminEmails.join(', '),
+                        subject: `Stock Restored Alert: ${item.item_name}`,
+                        html: `<h1>Stock Restored Alert</h1><p>Stock for "<b>${item.item_name}</b>" in "<b>${item.inventory_name}</b>" is now above the threshold.</p><ul><li>Current Quantity: <b>${newQuantity}</b></li><li>Threshold: <b>${threshold}</b></li><li>Last updated by: ${requesterName}</li></ul>`
+                    };
+                    await transporter.sendMail(mailOptions);
+                    console.log(`Stock restored notification sent to: ${adminEmails.join(', ')}`);
+                }
+            } else {
+                 console.log("No organization admins found to notify.");
+            }
+        } catch (notificationError) {
+            console.error("Error sending threshold notification:", notificationError);
+        }
+        // --- End of Updated Logic ---
+
         res.redirect(`/inventories/${inventoryId}?teamId=${teamId}`);
+
     } catch (error) {
-        if (connection) await connection.rollback();
+        if (connection && connection.connection._closing === false) await connection.rollback();
         console.error("Error updating stock:", error);
         res.status(500).send("Failed to update stock.");
     } finally {
-        if (connection) connection.release();
+        if (connection && connection.connection._closing === false) connection.release();
     }
 });
-
 app.get('/inventories/:inventoryId', authenticateToken, async (req, res) => {
     const { inventoryId } = req.params;
-    const { teamId } = req.query; // Get teamId from the query string for the back link
+    const { teamId } = req.query; // Get teamId from query string
     const requesterId = req.user.id;
 
+    if (!teamId) {
+        return res.status(400).send("Team ID is missing from query parameters.");
+    }
+
     try {
-        // Security Check: Verify the user is a member of the team assigned to this inventory
+        // Security Check & Permission Check
         const securitySql = `
-            SELECT ia.team_id FROM INVENTORY_ASSIGNMENTS ia
-            JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id
-            WHERE ia.inventory_id = ? AND tm.user_id = ? AND ia.team_id = ?`;
-        const [permission] = await dbPool.execute(securitySql, [inventoryId, requesterId, teamId]);
-        if (permission.length === 0) {
-            return res.status(403).send("Forbidden: You do not have access to this inventory.");
+            SELECT ia.team_id, r_org.role_name as org_role, r_team.role_name as team_role
+            FROM INVENTORY_ASSIGNMENTS ia
+            LEFT JOIN ORGANIZATION_MEMBERS om ON ia.org_id = om.org_id AND om.user_id = ? 
+            LEFT JOIN ROLES r_org ON om.role_id = r_org.role_id
+            LEFT JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id AND tm.user_id = ?
+            LEFT JOIN ROLES r_team ON tm.role_id = r_team.role_id
+            WHERE ia.inventory_id = ? AND ia.team_id = ?`;
+        
+        // Note: We need the org_id associated with the inventory/team
+        const [invOrg] = await dbPool.execute('SELECT org_id FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
+         if (invOrg.length === 0) return res.status(404).send("Inventory not found.");
+         const orgId = invOrg[0].org_id;
+
+        // Re-run security query incorporating org_id properly
+         const secureCheckSql = `
+            SELECT ia.team_id, r_org.role_name as org_role, r_team.role_name as team_role
+            FROM INVENTORY_ASSIGNMENTS ia
+            JOIN TEAMS t ON ia.team_id = t.team_id
+            LEFT JOIN ORGANIZATION_MEMBERS om ON t.org_id = om.org_id AND om.user_id = ? 
+            LEFT JOIN ROLES r_org ON om.role_id = r_org.role_id
+            LEFT JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id AND tm.user_id = ?
+            LEFT JOIN ROLES r_team ON tm.role_id = r_team.role_id
+            WHERE ia.inventory_id = ? AND ia.team_id = ? AND t.org_id = ?`;
+
+        const [permissionRows] = await dbPool.execute(secureCheckSql, [requesterId, requesterId, inventoryId, teamId, orgId]);
+
+        if (permissionRows.length === 0) {
+             // Check if user is at least a member of the team assigned
+             const memberCheckSql = `SELECT tm.user_id FROM TEAM_MEMBERS tm JOIN INVENTORY_ASSIGNMENTS ia ON tm.team_id = ia.team_id WHERE tm.user_id = ? AND ia.inventory_id = ? AND tm.team_id = ?`;
+             const [memberCheck] = await dbPool.execute(memberCheckSql, [requesterId, inventoryId, teamId]);
+             if (memberCheck.length === 0) {
+                return res.status(403).send("Forbidden: You do not have access to this inventory via this team.");
+             }
+             // User is a member but maybe not admin - proceed but userIsAdmin will be false
         }
 
-        // Fetch inventory details and all items within it
+
+        // Determine if user has admin rights
+        const orgRole = permissionRows.length > 0 ? permissionRows[0].org_role : null;
+        const teamRole = permissionRows.length > 0 ? permissionRows[0].team_role : null;
+        const userIsAdmin = (orgRole === 'Owner' || orgRole === 'Admin' || teamRole === 'Team Admin');
+
+        // Fetch inventory details and items
         const [inventories] = await dbPool.execute('SELECT inventory_id, inventory_name FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
         if (inventories.length === 0) return res.status(404).send("Inventory not found.");
         
@@ -782,7 +916,8 @@ app.get('/inventories/:inventoryId', authenticateToken, async (req, res) => {
         res.render('inventory-management', {
             inventory: inventories[0],
             items: items,
-            teamId: teamId
+            teamId: teamId,
+            userIsAdmin: userIsAdmin // Pass admin status to the view
         });
     } catch (error) {
         console.error("Error fetching inventory page:", error);
@@ -885,6 +1020,57 @@ app.post('/inventories/:inventoryId/delete', authenticateToken, async (req, res)
         res.status(500).send("Failed to delete inventory.");
     }
 });
+
+// ⭐ New: POST route to handle item deletion
+app.post('/items/:itemId/delete', authenticateToken, async (req, res) => {
+    const { itemId } = req.params;
+    const { inventoryId, teamId } = req.body; // Passed from hidden fields
+    const requesterId = req.user.id;
+
+    if (!inventoryId || !teamId) {
+        return res.status(400).send("Missing required IDs for redirection or security check.");
+    }
+
+    try {
+         // --- Security Check (Similar to the GET route) ---
+         const [invOrg] = await dbPool.execute('SELECT org_id FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
+         if (invOrg.length === 0) return res.status(404).send("Inventory not found.");
+         const orgId = invOrg[0].org_id;
+
+         const secureCheckSql = `
+            SELECT ia.team_id, r_org.role_name as org_role, r_team.role_name as team_role
+            FROM INVENTORY_ASSIGNMENTS ia
+            JOIN TEAMS t ON ia.team_id = t.team_id
+            LEFT JOIN ORGANIZATION_MEMBERS om ON t.org_id = om.org_id AND om.user_id = ? 
+            LEFT JOIN ROLES r_org ON om.role_id = r_org.role_id
+            LEFT JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id AND tm.user_id = ?
+            LEFT JOIN ROLES r_team ON tm.role_id = r_team.role_id
+            WHERE ia.inventory_id = ? AND ia.team_id = ? AND t.org_id = ?`;
+
+        const [permissionRows] = await dbPool.execute(secureCheckSql, [requesterId, requesterId, inventoryId, teamId, orgId]);
+
+        const orgRole = permissionRows.length > 0 ? permissionRows[0].org_role : null;
+        const teamRole = permissionRows.length > 0 ? permissionRows[0].team_role : null;
+        
+        if (orgRole !== 'Owner' && orgRole !== 'Admin' && teamRole !== 'Team Admin') {
+            return res.status(403).send("Forbidden: You do not have permission to delete items from this inventory.");
+        }
+        // --- End Security Check ---
+
+        // All checks passed. Delete the item.
+        // ON DELETE CASCADE will handle MOVEMENT_LOGS.
+        await dbPool.execute('DELETE FROM INVENTORY_ITEMS WHERE item_id = ?', [itemId]);
+
+        // Redirect back to the inventory management page
+        res.redirect(`/inventories/${inventoryId}?teamId=${teamId}`);
+
+    } catch (error) {
+        console.error("Error deleting item:", error);
+        res.status(500).send("Failed to delete item.");
+    }
+});
+
+
 // GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');

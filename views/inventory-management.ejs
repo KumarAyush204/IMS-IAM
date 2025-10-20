@@ -31,6 +31,7 @@
                     <th>Current Quantity</th>
                     <th>Threshold</th>
                     <th>Update Stock</th>
+                    <th>Action</th>
                 </tr>
             </thead>
             <tbody>
@@ -43,13 +44,24 @@
                             <form action="/items/<%= item.item_id %>/update-stock" method="POST">
                                 <input type="hidden" name="inventoryId" value="<%= inventory.inventory_id %>">
                                 <input type="hidden" name="teamId" value="<%= teamId %>">
-                                <input type="number" name="quantity_change" min="1" required>
+                                <input type="number" name="quantity_change" min="1" required style="width: 60px;">
                                 <select name="action">
                                     <option value="add">Add</option>
                                     <option value="remove">Remove</option>
                                 </select>
                                 <button type="submit">Update</button>
                             </form>
+                        </td>
+                        <td>
+                            <% if (userIsAdmin) { %>
+                                <form action="/items/<%= item.item_id %>/delete" method="POST">
+                                    <input type="hidden" name="inventoryId" value="<%= inventory.inventory_id %>">
+                                    <input type="hidden" name="teamId" value="<%= teamId %>">
+                                    <button type="submit" style="color: red;">Delete</button>
+                                </form>
+                            <% } else { %>
+                                N/A
+                            <% } %>
                         </td>
                     </tr>
                 <% }); %>

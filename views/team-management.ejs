@@ -15,7 +15,7 @@
             <% inventories.forEach(function(inventory, index) { %>
                 <li>
                     <a href="/inventories/<%= inventory.inventory_id %>?teamId=<%= team.team_id %>"><%= inventory.inventory_name %></a>
-                    
+
                     <% if (userIsAdmin) { %>
                         <button id="deleteBtn-<%= index %>" style="margin-left: 10px; color: red;">Delete</button>
 
@@ -23,10 +23,12 @@
                             <form action="/inventories/<%= inventory.inventory_id %>/delete" method="POST">
                                 <input type="hidden" name="teamId" value="<%= team.team_id %>">
                                 <label for="confirmation_name-<%= index %>">
-                                    Type "<b><%= inventory.inventory_name %></b>" to confirm:
+                                    To confirm, please type the inventory's name: <b><%= inventory.inventory_name %></b>
                                 </label>
+                                <br>
                                 <input type="text" id="confirmation_name-<%= index %>" name="confirmation_name" required>
-                                <button type="submit" style="color: red;">Delete</button>
+                                <br><br>
+                                <button type="submit" style="color: red;">I understand, permanently delete</button>
                                 <button type="button" id="cancelBtn-<%= index %>">Cancel</button>
                             </form>
                         </div>
@@ -43,7 +45,7 @@
     <% if (userIsAdmin) { %>
         <h2>Create New Inventory for this Team</h2>
         <form action="/teams/<%= team.team_id %>/inventories/create" method="POST">
-            <input type="hidden" name="orgId" value="<%= orgId %>">
+             <input type="hidden" name="orgId" value="<%= orgId %>">
             <div>
                 <label for="inventory_name">Inventory Name:</label>
                 <input type="text" id="inventory_name" name="inventory_name" required>
@@ -54,24 +56,24 @@
     <% } %>
 
     <script>
+        // Script to handle multiple confirmation forms (no changes needed here)
         document.addEventListener('DOMContentLoaded', function() {
             <% inventories.forEach(function(inventory, index) { %>
-                // ⭐ FIX: Variable names are now unique using the index
-                const deleteBtn_<%= index %> = document.getElementById('deleteBtn-<%= index %>');
-                const cancelBtn_<%= index %> = document.getElementById('cancelBtn-<%= index %>');
-                const confirmForm_<%= index %> = document.getElementById('confirmForm-<%= index %>');
+                const deleteBtn = document.getElementById('deleteBtn-<%= index %>');
+                const cancelBtn = document.getElementById('cancelBtn-<%= index %>');
+                const confirmForm = document.getElementById('confirmForm-<%= index %>');
 
-                if (deleteBtn_<%= index %>) {
-                    deleteBtn_<%= index %>.addEventListener('click', function() {
-                        confirmForm_<%= index %>.style.display = 'block';
+                if (deleteBtn) {
+                    deleteBtn.addEventListener('click', function() {
+                        confirmForm.style.display = 'block';
                         this.style.display = 'none';
                     });
                 }
                 
-                if (cancelBtn_<%= index %>) {
-                    cancelBtn_<%= index %>.addEventListener('click', function() {
-                        confirmForm_<%= index %>.style.display = 'none';
-                        deleteBtn_<%= index %>.style.display = 'inline';
+                if (cancelBtn) {
+                    cancelBtn.addEventListener('click', function() {
+                        confirmForm.style.display = 'none';
+                        if(deleteBtn) deleteBtn.style.display = 'inline'; // Check if deleteBtn exists before setting style
                     });
                 }
             <% }); %>
