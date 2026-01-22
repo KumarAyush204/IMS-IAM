@@ -1,4 +1,4 @@
-// ### 1. Import Dependencies ###
+
 const express = require('express');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcrypt');
@@ -6,25 +6,42 @@ const jwt =require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
+const serverless = require('serverless-http');
 
-// ### 2. App & Middleware Setup ###
 const app = express();
-const PORT = 3000;
+const PORT = process.env.APP_PORT || 3002;
 
 app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
-app.use(express.static('public')); // For any static files if needed in the future
+app.use(express.static('public')); 
+//For Local Setup
+// const dbPool = mysql.createPool({
+//     host: process.env.DB_HOST,
+//     user: process.env.DB_USER,
+//     password: process.env.DB_PASSWORD,
+//     database: process.env.DB_NAME
+// });
 
-// ### 3. Database & Nodemailer Setup ###
+
 const dbPool = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME
+    host: process.env.TIDB_HOST,
+    port: process.env.TIDB_PORT || 4000,
+    user: process.env.TIDB_USER,
+    password: process.env.TIDB_PASSWORD,
+    database: process.env.TIDB_DATABASE,
+    ssl: {
+        minVersion: 'TLSv1.2',
+        rejectUnauthorized: true
+    },
+    waitForConnections: true,
+    connectionLimit: 1, // Recommended for Serverless to avoid exhausting connections
+    maxIdle: 1,
+    idleTimeout: 60000,
+    queueLimit: 0,
 });
-console.log('✅ Database connection pool created.');
+console.log('Database connection created.');
 
 const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -33,9 +50,8 @@ const transporter = nodemailer.createTransport({
         pass: process.env.EMAIL_PASS
     }
 });
-console.log('📧 Nodemailer transporter configured.');
+console.log('Nodemailer configured.');
 
-// ### 4. Authentication Middleware ###
 const authenticateToken = (req, res, next) => {
     const token = req.cookies.token;
     if (!token) {
@@ -51,14 +67,11 @@ const authenticateToken = (req, res, next) => {
     }
 };
 
-// --- Page Routes ---
 app.get('/', (req, res) => res.redirect('/dashboard'));
 app.get('/login', (req, res) => res.render('login'));
 app.get('/register', (req, res) => res.render('register'));
 
-// --- API Endpoints ---
 
-// POST /register
 app.post('/register', async (req, res) => {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
@@ -67,7 +80,12 @@ app.post('/register', async (req, res) => {
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
         await dbPool.execute(`INSERT INTO USERS (name, email, password_hash) VALUES (?, ?, ?);`, [name, email, hashedPassword]);
-        res.send('<h1>Registration successful!</h1><p>You can now <a href="/login">log in</a>.</p>');
+        res.send(`
+  <div style="font-family: sans-serif; text-align: center; padding-top: 100px; color: #333;">
+    <h1 style="color: #28a745;">Registration successful!</h1>
+    <p>You can now <a href="/login" style="color: #007bff; text-decoration: none; font-weight: bold;">log in</a>.</p>
+  </div>
+`);
     } catch (error) {
         if (error.code === 'ER_DUP_ENTRY') {
             return res.status(409).send('Error: This email is already registered.');
@@ -77,7 +95,6 @@ app.post('/register', async (req, res) => {
     }
 });
 
-// POST /login
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -104,7 +121,6 @@ app.post('/login', async (req, res) => {
     }
 });
 
-// POST /organizations/create
 app.post('/organizations/create', authenticateToken, async (req, res) => {
     const { org_name } = req.body;
     const owner_id = req.user.id;
@@ -138,7 +154,7 @@ app.get('/organizations/:orgId', authenticateToken, async (req, res) => {
     const userId = req.user.id;
 
     try {
-        // Security: Ensure the user is a member of the org they are trying to view
+        
         const [membership] = await dbPool.execute(
             'SELECT org_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
             [userId, orgId]
@@ -147,7 +163,6 @@ app.get('/organizations/:orgId', authenticateToken, async (req, res) => {
             return res.status(403).send("Forbidden: You are not a member of this organization.");
         }
 
-        // Fetch organization details
         const [orgs] = await dbPool.execute('SELECT org_id, org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
         if (orgs.length === 0) {
             return res.status(404).send("Organization not found.");
@@ -161,11 +176,10 @@ app.get('/organizations/:orgId', authenticateToken, async (req, res) => {
     }
 });
 
-// POST /organizations/:orgId/add
 app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
     const { email: memberEmail } = req.body;
     const { orgId } = req.params;
-    const requesterId = req.user.id; // The person trying to add a member
+    const requesterId = req.user.id; 
     const adderName = req.user.name;
 
     if (!memberEmail) {
@@ -173,7 +187,7 @@ app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
     }
 
     try {
-        // ⭐ Step 1: Security Check - Verify the role of the user making the request.
+
         const requesterRoleSql = `
             SELECT r.role_name 
             FROM ORGANIZATION_MEMBERS om
@@ -193,16 +207,14 @@ app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
             return res.status(403).send("Forbidden: You do not have permission to add members to this organization.");
         }
         
-        // --- If the check passes, proceed with the original logic ---
-
-        // Step 2: Check if the user to be added is registered.
+        
         const [users] = await dbPool.execute('SELECT user_id FROM USERS WHERE email = ?', [memberEmail]);
         if (users.length === 0) {
             return res.status(404).send('<h1>User Not Found</h1><p>A user with this email is not registered. Please ask them to create an account first.</p><a href="/dashboard">Go Back</a>');
         }
         const memberId = users[0].user_id;
 
-        // Step 3: Check if the user is already in the organization.
+        
         const [existingMembers] = await dbPool.execute(
             'SELECT user_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
             [memberId, orgId]
@@ -211,13 +223,12 @@ app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
             return res.status(409).send('<h1>Already a Member</h1><p>This user is already in the organization.</p><a href="/dashboard">Go Back</a>');
         }
 
-        // Step 4: Add the user with the default 'Member' role (ID 3).
+        
         await dbPool.execute(
             'INSERT INTO ORGANIZATION_MEMBERS (org_id, user_id, role_id) VALUES (?, ?, ?)',
             [orgId, memberId, 3]
         );
 
-        // Step 5: Send a notification email.
         const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
         const mailOptions = {
             from: process.env.EMAIL_USER,
@@ -237,7 +248,6 @@ app.post('/organizations/:orgId/add', authenticateToken, async (req, res) => {
 
 
 
-// ⭐ New: POST route to handle team creation within an organization
 app.post('/organizations/:orgId/teams/create', authenticateToken, async (req, res) => {
     const { orgId } = req.params;
     const { team_name } = req.body;
@@ -248,7 +258,6 @@ app.post('/organizations/:orgId/teams/create', authenticateToken, async (req, re
     }
 
     try {
-        // Security Check: Verify the user is an Owner or Admin of this organization.
         const requesterRoleSql = `
             SELECT r.role_name 
             FROM ORGANIZATION_MEMBERS om
@@ -268,11 +277,9 @@ app.post('/organizations/:orgId/teams/create', authenticateToken, async (req, re
             return res.status(403).send("Forbidden: You do not have permission to create teams.");
         }
 
-        // All checks passed, create the team.
         const createTeamSql = 'INSERT INTO TEAMS (team_name, org_id) VALUES (?, ?)';
         await dbPool.execute(createTeamSql, [team_name, orgId]);
 
-        // Redirect back to the members management page.
         res.redirect(`/organizations/${orgId}/members`);
 
     } catch (error) {
@@ -286,7 +293,7 @@ app.post('/organizations/:orgId/teams/create', authenticateToken, async (req, re
 
 
 
-// GET /dashboard
+
 app.get('/dashboard', authenticateToken, async (req, res) => {
     try {
         const sql = `
@@ -303,14 +310,11 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
     }
 });
 
-// ⭐ New: GET route to show all members of an organization
-// ⭐ Corrected: This route now correctly fetches the user_id for team members.
 app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => {
     const { orgId } = req.params;
     const userId = req.user.id;
 
     try {
-        // Step 1: Security Check - Verify the user is a member of the organization.
         const [membershipCheck] = await dbPool.execute(
             'SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?',
             [userId, orgId]
@@ -319,14 +323,11 @@ app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => 
             return res.status(403).send("Forbidden: You are not a member of this organization.");
         }
 
-        // Step 2: Fetch all primary data in parallel for efficiency.
-        // Get organization details.
         const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
         if (orgs.length === 0) {
             return res.status(404).send("Organization not found.");
         }
         
-        // Get all members of the organization.
         const membersSql = `
             SELECT u.user_id, u.name, u.email, r.role_name, om.role_id 
             FROM ORGANIZATION_MEMBERS om 
@@ -334,17 +335,14 @@ app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => 
             JOIN ROLES r ON om.role_id = r.role_id 
             WHERE om.org_id = ? ORDER BY r.role_id, u.name;`;
         const [members] = await dbPool.execute(membersSql, [orgId]);
-        
-        // Get all possible roles for the 'organization' scope.
+      
         const [orgRoles] = await dbPool.execute(`SELECT role_id, role_name FROM ROLES WHERE scope = 'organization'`);
         
-        // Get all teams within the organization.
         const [teams] = await dbPool.execute('SELECT team_id, team_name FROM TEAMS WHERE org_id = ?', [orgId]);
         
-        // Get all possible roles for the 'team' scope.
         const [teamRoles] = await dbPool.execute(`SELECT role_id, role_name FROM ROLES WHERE scope = 'team'`);
 
-        // Step 3: Fetch members for each team and structure the data.
+
         const teamsWithMembers = await Promise.all(teams.map(async (team) => {
             const teamMembersSql = `
                 SELECT u.user_id, u.name, r.role_id, r.role_name
@@ -354,22 +352,20 @@ app.get('/organizations/:orgId/members', authenticateToken, async (req, res) => 
                 WHERE tm.team_id = ?`;
             const [teamMembers] = await dbPool.execute(teamMembersSql, [team.team_id]);
             
-            // Return a new object for the team that includes its members list.
             return {
                 ...team,
                 members: teamMembers
             };
         }));
 
-        // Step 4: Render the page with all the fetched and structured data.
         res.render('org-members', {
             user: req.user,
             orgName: orgs[0].org_name,
             orgId: orgId,
-            members: members,       // List of organization members
-            orgRoles: orgRoles,     // List of possible organization roles
-            teams: teamsWithMembers,// List of teams, each with its members
-            teamRoles: teamRoles    // List of possible team roles
+            members: members,      
+            orgRoles: orgRoles,     
+            teams: teamsWithMembers,
+            teamRoles: teamRoles    
         });
 
     } catch (error) {
@@ -387,7 +383,7 @@ app.post('/teams/:teamId/members/:memberId/remove', authenticateToken, async (re
     }
 
     try {
-        // Security Check: Verify the user making the request is an Owner or Admin of the organization.
+
         const requesterRoleSql = `
             SELECT r.role_name 
             FROM ORGANIZATION_MEMBERS om
@@ -407,11 +403,10 @@ app.post('/teams/:teamId/members/:memberId/remove', authenticateToken, async (re
             return res.status(403).send("Forbidden: You do not have permission to remove team members.");
         }
 
-        // All checks passed. Delete the user from the TEAM_MEMBERS table.
+
         const deleteSql = 'DELETE FROM TEAM_MEMBERS WHERE team_id = ? AND user_id = ?';
         await dbPool.execute(deleteSql, [teamId, memberId]);
 
-        // Redirect back to the members management page.
         res.redirect(`/organizations/${orgId}/members`);
 
     } catch (error) {
@@ -420,20 +415,17 @@ app.post('/teams/:teamId/members/:memberId/remove', authenticateToken, async (re
     }
 });
 
-// ⭐ New: POST route to handle updating a user's role
 app.post('/organizations/:orgId/members/:memberId/update-role', authenticateToken, async (req, res) => {
     const { orgId, memberId } = req.params;
     const { new_role_id } = req.body;
     const requesterId = req.user.id;
 
     try {
-        // 🛡️ Security Check: Get the role of the person MAKING the request
         const [requesterRows] = await dbPool.execute(
             'SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?',
             [requesterId, orgId]
         );
 
-        // Debugging log
         console.log(`SECURITY CHECK (Org Role Update): User ${requesterId} attempting action on org ${orgId}.`);
 
         if (requesterRows.length === 0) {
@@ -446,7 +438,7 @@ app.post('/organizations/:orgId/members/:memberId/update-role', authenticateToke
 
         console.log(`-> Requester's role is '${requesterRole}'. Allowed roles: ['Owner', 'Admin'].`);
 
-        // Security Check: Ensure the requester is an Owner or Admin
+
         if (!allowedRoles.includes(requesterRole)) {
             console.log(`-> DENIED: Role '${requesterRole}' is not authorized.`);
             return res.status(403).send("Forbidden: You do not have permission to change roles.");
@@ -454,13 +446,11 @@ app.post('/organizations/:orgId/members/:memberId/update-role', authenticateToke
         
         console.log(`-> ALLOWED: Proceeding with role update.`);
 
-        // Security Check: Prevent the Owner's role from being changed
         const [targetUserRows] = await dbPool.execute('SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?', [memberId, orgId]);
         if (targetUserRows.length > 0 && targetUserRows[0].role_name === 'Owner') {
             return res.status(403).send("Forbidden: The role of the organization owner cannot be changed.");
         }
 
-        // All checks passed, update the user's role
         const updateSql = 'UPDATE ORGANIZATION_MEMBERS SET role_id = ? WHERE user_id = ? AND org_id = ?';
         await dbPool.execute(updateSql, [new_role_id, memberId, orgId]);
 
@@ -473,7 +463,6 @@ app.post('/organizations/:orgId/members/:memberId/update-role', authenticateToke
 });
 
 
-// ⭐ New: POST route to handle organization deletion
 app.post('/organizations/:orgId/delete', authenticateToken, async (req, res) => {
     const { orgId } = req.params;
     const { confirmation_name } = req.body;
@@ -492,7 +481,6 @@ app.post('/organizations/:orgId/delete', authenticateToken, async (req, res) => 
             return res.status(403).send("Forbidden: Only the organization owner can delete the organization.");
         }
 
-        // 🛡️ Security Check 2: Verify the typed confirmation name matches the actual name.
         const [orgs] = await dbPool.execute('SELECT org_name FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
         if (orgs.length === 0) {
             return res.status(404).send("Organization not found.");
@@ -502,12 +490,9 @@ app.post('/organizations/:orgId/delete', authenticateToken, async (req, res) => 
             return res.status(400).send("Confirmation name does not match. Deletion aborted.");
         }
 
-        // 🗑️ All checks passed. Proceed with deletion.
-        // Because of `ON DELETE CASCADE` in your database schema, deleting the organization
-        // will automatically delete all related teams, members, inventories, etc.
+
         await dbPool.execute('DELETE FROM ORGANIZATIONS WHERE org_id = ?', [orgId]);
 
-        // Redirect to the dashboard after successful deletion.
         res.redirect('/dashboard');
 
     } catch (error) {
@@ -517,7 +502,6 @@ app.post('/organizations/:orgId/delete', authenticateToken, async (req, res) => 
 });
 
 
-// ⭐ New: POST route to assign an organization member to a team
 app.post('/organizations/:orgId/members/:memberId/assign-team', authenticateToken, async (req, res) => {
     const { orgId, memberId } = req.params;
     const { team_id } = req.body;
@@ -528,7 +512,6 @@ app.post('/organizations/:orgId/members/:memberId/assign-team', authenticateToke
     }
 
     try {
-        // Security Check: Verify the user making the request is an Owner or Admin.
         const requesterRoleSql = `
             SELECT r.role_name 
             FROM ORGANIZATION_MEMBERS om
@@ -548,21 +531,18 @@ app.post('/organizations/:orgId/members/:memberId/assign-team', authenticateToke
             return res.status(403).send("Forbidden: You do not have permission to assign members to teams.");
         }
 
-        // Check if the user is already in the team to prevent duplicate entries.
         const [existing] = await dbPool.execute(
             'SELECT * FROM TEAM_MEMBERS WHERE user_id = ? AND team_id = ?',
             [memberId, team_id]
         );
         if (existing.length > 0) {
-            // Optionally, you can send a message back. For now, we just redirect.
+            
             return res.redirect(`/organizations/${orgId}/members`);
         }
 
-        // All checks passed. Add the user to the team with the default 'Team Member' role (ID 5).
         const assignSql = 'INSERT INTO TEAM_MEMBERS (team_id, user_id, role_id) VALUES (?, ?, ?)';
         await dbPool.execute(assignSql, [team_id, memberId, 5]);
 
-        // Redirect back to the members management page.
         res.redirect(`/organizations/${orgId}/members`);
 
     } catch (error) {
@@ -570,7 +550,6 @@ app.post('/organizations/:orgId/members/:memberId/assign-team', authenticateToke
         res.status(500).send("Failed to assign member to team.");
     }
 });
-// ⭐ New: POST route to update a team member's role
 app.post('/teams/:teamId/members/:memberId/update-role', authenticateToken, async (req, res) => {
     const { teamId, memberId } = req.params;
     const { new_team_role_id, orgId } = req.body;
@@ -581,7 +560,6 @@ app.post('/teams/:teamId/members/:memberId/update-role', authenticateToken, asyn
     }
 
     try {
-        // 🛡️ Security Check: Get the requester's organization-level role
         const [orgRoleRows] = await dbPool.execute(`SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?`, [requesterId, orgId]);
 
         console.log(`SECURITY CHECK (Team Role Update): User ${requesterId} attempting action on team ${teamId}.`);
@@ -629,7 +607,6 @@ app.get('/teams/:teamId', authenticateToken, async (req, res) => {
     const requesterId = req.user.id;
 
     try {
-        // Step 1: Fetch core team details, ensuring team_id is included.
         const [teams] = await dbPool.execute(
             'SELECT team_id, team_name, org_id FROM TEAMS WHERE team_id = ?', 
             [teamId]
@@ -639,7 +616,6 @@ app.get('/teams/:teamId', authenticateToken, async (req, res) => {
         }
         const team = teams[0];
 
-        // Step 2: Security Check - Verify the user is part of the team's parent organization.
         const [orgMembership] = await dbPool.execute(
             'SELECT role_id FROM ORGANIZATION_MEMBERS WHERE user_id = ? AND org_id = ?', 
             [requesterId, team.org_id]
@@ -648,7 +624,6 @@ app.get('/teams/:teamId', authenticateToken, async (req, res) => {
             return res.status(403).send("Forbidden: You are not a member of this team's organization.");
         }
         
-        // Step 3: Fetch the inventories assigned specifically to this team.
         const inventoriesSql = `
             SELECT i.inventory_id, i.inventory_name 
             FROM INVENTORY_ASSIGNMENTS ia 
@@ -656,8 +631,7 @@ app.get('/teams/:teamId', authenticateToken, async (req, res) => {
             WHERE ia.team_id = ?`;
         const [inventories] = await dbPool.execute(inventoriesSql, [teamId]);
 
-        // Step 4: Permission Check - Determine if the user has admin rights to create new inventories.
-        // This checks if they are an Owner/Admin of the organization OR a Team Admin of this specific team.
+      
         const [orgRoleRows] = await dbPool.execute(`SELECT r.role_name FROM ORGANIZATION_MEMBERS om JOIN ROLES r ON om.role_id = r.role_id WHERE om.user_id = ? AND om.org_id = ?`, [requesterId, team.org_id]);
         const [teamRoleRows] = await dbPool.execute(`SELECT r.role_name FROM TEAM_MEMBERS tm JOIN ROLES r ON tm.role_id = r.role_id WHERE tm.user_id = ? AND tm.team_id = ?`, [requesterId, teamId]);
         
@@ -666,10 +640,10 @@ app.get('/teams/:teamId', authenticateToken, async (req, res) => {
         
         const userIsAdmin = (orgRole === 'Owner' || orgRole === 'Admin' || teamRole === 'Team Admin');
 
-        // Step 5: Render the page with all the necessary data.
+
         res.render('team-management', {
             user: req.user,
-            team: team, // This object now correctly contains team.team_id
+            team: team, 
             orgId: team.org_id,
             inventories: inventories,
             userIsAdmin: userIsAdmin
@@ -686,7 +660,6 @@ app.post('/inventories/:inventoryId/items/create', authenticateToken, async (req
     const { item_name, quantity, threshold, teamId } = req.body;
     const requesterId = req.user.id;
 
-    // (The same security check as the GET route)
     const securitySql = `SELECT ia.team_id FROM INVENTORY_ASSIGNMENTS ia JOIN TEAM_MEMBERS tm ON ia.team_id = tm.team_id WHERE ia.inventory_id = ? AND tm.user_id = ? AND ia.team_id = ?`;
     const [permission] = await dbPool.execute(securitySql, [inventoryId, requesterId, teamId]);
     if (permission.length === 0) return res.status(403).send("Forbidden...");
@@ -701,7 +674,6 @@ app.post('/inventories/:inventoryId/items/create', authenticateToken, async (req
         const [itemResult] = await connection.execute(itemSql, [inventoryId, item_name, quantity, threshold]);
         const newItemId = itemResult.insertId;
 
-        // 2. Log the creation in MOVEMENT_LOGS
         const logSql = 'INSERT INTO MOVEMENT_LOGS (item_id, user_id, action, quantity_change, notes) VALUES (?, ?, ?, ?, ?)';
         await connection.execute(logSql, [newItemId, requesterId, 'add', quantity, 'Item created']);
 
@@ -723,7 +695,6 @@ app.post('/items/:itemId/update-stock', authenticateToken, async (req, res) => {
     const requesterId = req.user.id;
     const requesterName = req.user.name;
 
-    // Input validation
     if (!inventoryId || !teamId || !quantity_change || !action) {
         return res.status(400).send("Missing required information.");
     }
@@ -734,19 +705,18 @@ app.post('/items/:itemId/update-stock', authenticateToken, async (req, res) => {
 
     let connection;
     try {
-        // --- Security Check (remains the same) ---
         const [invOrg] = await dbPool.execute('SELECT org_id FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
         if (invOrg.length === 0) return res.status(404).send("Inventory not found.");
         const orgId = invOrg[0].org_id;
         const secureCheckSql = `SELECT tm.user_id FROM TEAM_MEMBERS tm JOIN INVENTORY_ASSIGNMENTS ia ON tm.team_id = ia.team_id WHERE tm.user_id = ? AND ia.inventory_id = ? AND tm.team_id = ?`;
         const [permissionRows] = await dbPool.execute(secureCheckSql, [requesterId, inventoryId, teamId]);
         if (permissionRows.length === 0) return res.status(403).send("Forbidden...");
-        // --- End Security Check ---
+      
 
         connection = await dbPool.getConnection();
         await connection.beginTransaction();
 
-        // 1. ⭐ Get current quantity and threshold BEFORE the update
+
         const [currentItemStateRows] = await connection.execute(
             'SELECT quantity, threshold FROM INVENTORY_ITEMS WHERE item_id = ?',
             [itemId]
@@ -791,7 +761,7 @@ app.post('/items/:itemId/update-stock', authenticateToken, async (req, res) => {
         await connection.commit();
         connection.release(); // Release connection
 
-        // --- ⭐ Updated: Notification Logic ---
+        
         try {
             // Get item name and inventory name for emails
             const itemDetailsSql = `
@@ -823,7 +793,7 @@ app.post('/items/:itemId/update-stock', authenticateToken, async (req, res) => {
                     await transporter.sendMail(mailOptions);
                     console.log(`Low stock notification sent to: ${adminEmails.join(', ')}`);
 
-                // Condition 2: Check if stock was low/threshold AND is now above threshold
+                // Condition Check if stock was low/threshold AND is now above threshold
                 } else if (originalQuantity <= threshold && newQuantity > threshold) {
                     console.log(`Stock restored for item "${item.item_name}". Notifying admins...`);
                     const mailOptions = {
@@ -841,7 +811,6 @@ app.post('/items/:itemId/update-stock', authenticateToken, async (req, res) => {
         } catch (notificationError) {
             console.error("Error sending threshold notification:", notificationError);
         }
-        // --- End of Updated Logic ---
 
         res.redirect(`/inventories/${inventoryId}?teamId=${teamId}`);
 
@@ -863,7 +832,6 @@ app.get('/inventories/:inventoryId', authenticateToken, async (req, res) => {
     }
 
     try {
-        // Security Check & Permission Check
         const securitySql = `
             SELECT ia.team_id, r_org.role_name as org_role, r_team.role_name as team_role
             FROM INVENTORY_ASSIGNMENTS ia
@@ -873,12 +841,10 @@ app.get('/inventories/:inventoryId', authenticateToken, async (req, res) => {
             LEFT JOIN ROLES r_team ON tm.role_id = r_team.role_id
             WHERE ia.inventory_id = ? AND ia.team_id = ?`;
         
-        // Note: We need the org_id associated with the inventory/team
         const [invOrg] = await dbPool.execute('SELECT org_id FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
          if (invOrg.length === 0) return res.status(404).send("Inventory not found.");
          const orgId = invOrg[0].org_id;
 
-        // Re-run security query incorporating org_id properly
          const secureCheckSql = `
             SELECT ia.team_id, r_org.role_name as org_role, r_team.role_name as team_role
             FROM INVENTORY_ASSIGNMENTS ia
@@ -926,7 +892,7 @@ app.get('/inventories/:inventoryId', authenticateToken, async (req, res) => {
 });
 
 
-// ⭐ New: POST route to handle inventory creation for a team
+
 app.post('/teams/:teamId/inventories/create', authenticateToken, async (req, res) => {
     const { teamId } = req.params;
     const { inventory_name, orgId } = req.body;
@@ -973,7 +939,6 @@ app.post('/teams/:teamId/inventories/create', authenticateToken, async (req, res
     }
 });
 
-// ⭐ New: POST route to handle inventory deletion
 app.post('/inventories/:inventoryId/delete', authenticateToken, async (req, res) => {
     const { inventoryId } = req.params;
     // New confirmation_name field from the form
@@ -985,7 +950,7 @@ app.post('/inventories/:inventoryId/delete', authenticateToken, async (req, res)
     }
 
     try {
-        // --- Security Check 1: Verify the user has permission (Owner, Admin, or Team Admin) ---
+        
         const [teams] = await dbPool.execute('SELECT org_id FROM TEAMS WHERE team_id = ?', [teamId]);
         if (teams.length === 0) return res.status(404).send("Associated team not found.");
         const orgId = teams[0].org_id;
@@ -1000,7 +965,7 @@ app.post('/inventories/:inventoryId/delete', authenticateToken, async (req, res)
             return res.status(403).send("Forbidden: You do not have permission to delete inventories for this team.");
         }
 
-        // --- 🛡️ Security Check 2: Verify the typed name matches the actual inventory name ---
+        
         const [inventories] = await dbPool.execute('SELECT inventory_name FROM INVENTORIES WHERE inventory_id = ?', [inventoryId]);
         if (inventories.length === 0) {
             return res.status(404).send("Inventory not found.");
@@ -1021,7 +986,6 @@ app.post('/inventories/:inventoryId/delete', authenticateToken, async (req, res)
     }
 });
 
-// ⭐ New: POST route to handle item deletion
 app.post('/items/:itemId/delete', authenticateToken, async (req, res) => {
     const { itemId } = req.params;
     const { inventoryId, teamId } = req.body; // Passed from hidden fields
@@ -1055,10 +1019,6 @@ app.post('/items/:itemId/delete', authenticateToken, async (req, res) => {
         if (orgRole !== 'Owner' && orgRole !== 'Admin' && teamRole !== 'Team Admin') {
             return res.status(403).send("Forbidden: You do not have permission to delete items from this inventory.");
         }
-        // --- End Security Check ---
-
-        // All checks passed. Delete the item.
-        // ON DELETE CASCADE will handle MOVEMENT_LOGS.
         await dbPool.execute('DELETE FROM INVENTORY_ITEMS WHERE item_id = ?', [itemId]);
 
         // Redirect back to the inventory management page
@@ -1071,13 +1031,14 @@ app.post('/items/:itemId/delete', authenticateToken, async (req, res) => {
 });
 
 
-// GET /logout
 app.get('/logout', (req, res) => {
     res.clearCookie('token');
     res.redirect('/login');
 });
 
-// ### 5. Start Server ###
 app.listen(PORT, () => {
-    console.log(`🚀 Server is running on http://localhost:${PORT}`);
+    console.log(`Server is running on http://localhost:${PORT}`);
 });
+//module.exports.handler = serverless(app, {
+//  base: 'default' // Tells serverless-http to strip /default from 
+//});
