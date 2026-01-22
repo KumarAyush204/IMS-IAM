@@ -5,6 +5,7 @@ const bcrypt = require('bcrypt');
 const jwt =require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const nodemailer = require('nodemailer');
+const path=require('path');
 require('dotenv').config();
 const serverless = require('serverless-http');
 
@@ -12,10 +13,12 @@ const app = express();
 const PORT = process.env.APP_PORT || 3002;
 
 app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, '../views'));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser());
-app.use(express.static('public')); 
+app.use(express.static(path.join(__dirname, '../public')));
+
 //For Local Setup
 // const dbPool = mysql.createPool({
 //     host: process.env.DB_HOST,
@@ -1036,9 +1039,17 @@ app.get('/logout', (req, res) => {
     res.redirect('/login');
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
+// app.listen(PORT, () => {
+//     console.log(`Server is running on http://localhost:${PORT}`);
+// });
 //module.exports.handler = serverless(app, {
 //  base: 'default' // Tells serverless-http to strip /default from 
 //});
+
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => {
+        console.log(`Server is running on http://localhost:${PORT}`);
+    });
+}
+
+module.exports = app;
